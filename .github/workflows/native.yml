@@ -296,8 +296,8 @@ jobs:
             gh api -X DELETE repos/$GITHUB_REPOSITORY/releases/assets/$id
           done
           gh release upload "$TAG" \
-            "pkgs/neonify-windows-cpp/neonify-windows-cpp-v$TAG.zip" \
-            "pkgs/neonify-linux-cpp/neonify-linux-cpp-v$TAG.tar.gz" \
-            "pkgs/neonify-windows-python/neonify-windows-python-v$TAG.zip" \
-            "pkgs/neonify-linux-python/neonify-linux-python-v$TAG.tar.gz" \
+            "pkgs/neonify-windows-cpp/neonify-windows-cpp-$TAG.zip" \
+            "pkgs/neonify-linux-cpp/neonify-linux-cpp-$TAG.tar.gz" \
+            "pkgs/neonify-windows-python/neonify-windows-python-$TAG.zip" \
+            "pkgs/neonify-linux-python/neonify-linux-python-$TAG.tar.gz" \
             --clobber
