@@ -17,7 +17,7 @@
 
 ---
 
-**Neonify** is a local, free, offline procedural art engine that transforms whatever asset you feed it into neon tube art. Edge detection finds the lines, Gaussian bloom pyramids make them glow, palette mapping gives them color — no neural networks, no model downloads, no accounts. The entire engine is deterministic math running on your machine, and it uses your CUDA GPU automatically when one is present (falling back to full CPU when it is not).
+**Neonify** is a local, free, offline procedural art engine that transforms whatever asset you feed it into neon art. Edge detection finds the lines, Gaussian bloom pyramids make them glow, palette mapping gives them color, and audio gets rebuilt through a chain of neon sound effects — no neural networks, no model downloads, no accounts. The entire engine is deterministic math running on your machine, and it uses your CUDA GPU automatically when one is present (falling back to full CPU when it is not).
 
 📦 **Pre-built binaries available** — no Python or setup needed. Grab the [latest release](https://github.com/HAKORADev/Neonify/releases) with CPU binaries for Windows and Linux, download, extract, and run.
 
@@ -31,7 +31,10 @@
 git clone https://github.com/HAKORADev/Neonify.git
 cd Neonify
 
-# Install dependencies
+# Install PyTorch first (CPU build is enough — GPU is used automatically if you install a CUDA build)
+pip install torch
+
+# Install the rest of the dependencies
 pip install -r requirements.txt
 
 # Launch GUI
@@ -57,22 +60,21 @@ python src/neonify.py cli
 |---------|-------|--------|--------|
 | **neon** | Image | `_neon` image | Sobel edges → multi-octave bloom → palette mapping |
 | **neon** | Video | `_neon` video | Per-frame neon engine + audio-reactive glow pulse (STFT beat envelope) |
-| **audio** | Audio | `_neon.png` spectrogram art | STFT magnitude → log-frequency neon spectrum |
-| **audio --anim** | Audio | `_neon.mp4` | Animated glowing spectrum bars synced to the music, original audio muxed |
+| **audio** | Audio | `_neon.wav` | Real neon sound: tube drive, ping-pong echoes, void reverb, pulse tremolo, shimmer vibrato, slash sweeps |
 | **mesh** | `.obj` / `.stl` | `_neon.png` | Wireframe extraction → perspective projection → depth-weighted glow (Fresnel-style rim) |
 | **mesh --turntable** | `.obj` / `.stl` | `_neon_turntable.mp4` | Full orbit animation of the glowing wireframe |
 
-### 🎨 **7 Neon Palettes**
+### 🎨 **7 Neon Palettes — for pixels and for sound**
 
-| Palette | Mood |
-|---------|------|
-| **Electric** (default) | Deep blue → cyan → white, classic neon sign |
-| **Synthwave** | Purple → pink → sunset orange |
-| **Toxic** | Radioactive green → lime |
-| **Ice** | Frozen blue → pure white |
-| **Fire** | Ember red → orange → white heat |
-| **Ghost** | Monochrome white — the dark&white signature |
-| **Spectrum** | Hue mapped to edge direction — every angle gets its own color |
+| Palette | Look | Sound |
+|---------|------|-------|
+| **Electric** (default) | Deep blue → cyan → white, classic neon sign | Bright, punchy, crisp echoes |
+| **Synthwave** | Purple → pink → sunset orange | Warm tape echoes, slow sunset wobble |
+| **Toxic** | Radioactive green → lime | Acid bite, fast tremolo, sharp slashes |
+| **Ice** | Frozen blue → pure white | Clean, wide, long crystalline void |
+| **Fire** | Ember red → orange → white heat | Hot drive, heavy sub rumble |
+| **Ghost** | Monochrome white — the dark&white signature | Haunted dark void, distant muffled echoes |
+| **Spectrum** | Hue mapped to edge direction — every angle gets its own color | Everything at once, widest stage |
 
 ---
 
@@ -84,7 +86,7 @@ python src/neonify.py cli
 2. Drag & drop files (images, videos, audio and meshes can be mixed)
 3. Pick palette, glow and edge threshold
 4. Click **NEONIFY**
-5. Preview results with the before/after comparison slider
+5. Preview results — images/videos with the before/after comparison slider, audio with the waveform view and a play button
 6. Open the output folder — every result lands next to its source with a `_neon` name
 
 ### CLI Mode (Interactive)
@@ -102,7 +104,7 @@ python src/neonify.py neon art.png --threshold 0.06
 
 # Audio
 python src/neonify.py audio song.mp3
-python src/neonify.py audio song.mp3 --anim
+python src/neonify.py audio song.mp3 --palette ghost
 
 # 3D meshes
 python src/neonify.py mesh model.obj
@@ -120,11 +122,25 @@ python src/neonify.py info
 | `--glow` | 0.2 – 3.0 | 1.0 | Bloom intensity multiplier |
 | `--threshold` | 0.02 – 0.5 | 0.12 | Edge detection sensitivity |
 | `--pulse` | auto, on, off | auto | Audio-reactive glow pulse for videos |
-| `--anim` | flag | off | Audio: animated spectrum video instead of PNG |
 | `--turntable` | frames | 0 | Mesh: orbit video with N frames |
 | `--azimuth` / `--elevation` | degrees | 30 / 20 | Mesh camera angles for single views |
 | `--device` | auto, cpu, gpu | auto | Compute device (GPU falls back to CPU) |
 | `-o` | path | auto | Output file or folder |
+
+---
+
+## 🔊 Neon Audio
+
+`neonify audio track.mp3` does not draw the sound — it **re-synthesizes it**. The output is a real neonized audio file (`track_neon.wav`, stereo 44.1 kHz) built from a pure-math DSP chain:
+
+- **Tube glow drive** — asymmetric tanh saturation, like a neon sign buzzing to life
+- **Ping-pong echoes** — feedback delay lines bouncing left ↔ right, darkening per bounce
+- **Void reverb** — a deep, dark multi-tap space under the track
+- **Pulse tremolo + shimmer vibrato** — the glow literally breathes through the amplitude and pitch
+- **Slash sweeps** — two resonant sweeps slicing across the spectrum (STFT-domain filter)
+- **Wide neon stage** — mid/side widening, sub rumble under the bass, air shelf on top, soft-clip limiter
+
+Every palette doubles as a sound profile and the Glow setting drives the FX intensity — so the same track can go haunted (`ghost`), acid (`toxic`), frozen (`ice`) or rumbling (`fire`) with one flag.
 
 ---
 
@@ -135,7 +151,7 @@ No AI anywhere — every pixel is earned with math:
 - **Edges**: Sobel operators on a pre-smoothed luminance field, soft-thresholded into tube lines
 - **Glow**: a cascade of wide Gaussian blurs at four octaves, additive-composited into a bloom field
 - **Color**: intensity-mapped palette LUTs with a white-hot core pass for the tube centers
-- **Audio**: short-time Fourier transform, log-frequency warping, percentile-robust normalization
+- **Audio**: pure numpy DSP — FFT convolutions for filters, multi-tap delay networks for echo and void, overlap-add STFT for the slash sweeps, tanh waveshaping for the tube drive
 - **Pulse**: the video's own audio track is decoded and its STFT envelope modulates the bloom octaves per frame — the glow literally breathes with the beat
 - **Meshes**: OBJ/STL parsing, deduplicated edge extraction, orbit camera with perspective projection, depth-weighted line intensity for the rim-glow look
 
@@ -181,6 +197,4 @@ No AI anywhere — every pixel is earned with math:
 
 ## License
 
-Neonify is proprietary — personal, private, non-commercial use permitted. See [LICENSE](LICENSE).
-
-Runtime dependencies keep their own licenses (PyTorch BSD, OpenCV Apache 2.0, NumPy BSD, PyQt5 GPL).
+Released under the [MIT License](LICENSE).

@@ -16,6 +16,7 @@ import struct
 import subprocess
 import threading
 import time
+import wave
 from pathlib import Path
 
 import numpy as np
@@ -646,106 +647,274 @@ def stft_magnitude(x, n_fft=2048, hop=512):
     return np.abs(np.fft.rfft(frames, axis=1))
 
 
-def _resize_width(matrix, target_w):
-    h, w = matrix.shape
-    if w <= target_w:
-        return matrix
-    return cv2.resize(matrix, (target_w, h), interpolation=cv2.INTER_LINEAR)
+AUDIO_SR = 44100
+
+AUDIO_PROFILES = {
+    'electric': dict(drive=1.5, echo_time=0.23, echo_fb=0.38, echo_damp=4200, echo_mix=0.34,
+                     void_mix=0.26, void_tone=3800, trem_rate=2.4, trem_depth=0.20,
+                     vib_rate=5.2, vib_ms=1.1, slash=0.10, air=0.30, sub=1.15, width=0.30),
+    'synthwave': dict(drive=1.9, echo_time=0.34, echo_fb=0.46, echo_damp=2600, echo_mix=0.40,
+                      void_mix=0.32, void_tone=2600, trem_rate=1.6, trem_depth=0.28,
+                      vib_rate=4.2, vib_ms=1.8, slash=0.08, air=0.18, sub=1.25, width=0.38),
+    'toxic': dict(drive=2.3, echo_time=0.19, echo_fb=0.34, echo_damp=5200, echo_mix=0.30,
+                  void_mix=0.22, void_tone=4600, trem_rate=3.4, trem_depth=0.33,
+                  vib_rate=6.5, vib_ms=1.0, slash=0.16, air=0.34, sub=1.10, width=0.34),
+    'ice': dict(drive=1.1, echo_time=0.42, echo_fb=0.44, echo_damp=6000, echo_mix=0.36,
+                void_mix=0.40, void_tone=5200, trem_rate=1.2, trem_depth=0.14,
+                vib_rate=3.1, vib_ms=0.9, slash=0.06, air=0.40, sub=1.05, width=0.42),
+    'fire': dict(drive=2.6, echo_time=0.28, echo_fb=0.50, echo_damp=1800, echo_mix=0.38,
+                 void_mix=0.34, void_tone=1900, trem_rate=2.0, trem_depth=0.24,
+                 vib_rate=3.6, vib_ms=1.4, slash=0.10, air=0.22, sub=1.50, width=0.30),
+    'ghost': dict(drive=1.4, echo_time=0.55, echo_fb=0.52, echo_damp=1200, echo_mix=0.44,
+                  void_mix=0.50, void_tone=1100, trem_rate=0.8, trem_depth=0.18,
+                  vib_rate=2.2, vib_ms=2.2, slash=0.05, air=0.08, sub=1.35, width=0.46),
+    'spectrum': dict(drive=2.0, echo_time=0.30, echo_fb=0.45, echo_damp=3800, echo_mix=0.40,
+                     void_mix=0.36, void_tone=3400, trem_rate=2.8, trem_depth=0.30,
+                     vib_rate=5.0, vib_ms=1.6, slash=0.18, air=0.32, sub=1.30, width=0.44),
+}
 
 
-def neonize_audio_file(input_path, output_path, opts, step_bar=None):
-    x, sr = decode_audio_pcm(input_path)
-    if x is None:
+def decode_audio_stereo(path, sr=AUDIO_SR):
+    ensure_ffmpeg()
+    cmd = [
+        'ffmpeg', '-y', '-loglevel', 'error', '-i', str(path),
+        '-vn', '-ac', '2', '-ar', str(sr), '-f', 's16le', 'pipe:1'
+    ]
+    result = subprocess.run(cmd, capture_output=True, timeout=3600)
+    if result.returncode != 0 or len(result.stdout) < 4096:
+        return None, sr
+    x = np.frombuffer(result.stdout, dtype='<i2').astype(np.float32) / 32768.0
+    x = x.reshape(-1, 2)
+    return x[:, 0].copy(), x[:, 1].copy(), sr
+
+
+def write_wav_stereo(path, l, r, sr=AUDIO_SR):
+    data = np.stack([np.clip(l, -1.0, 1.0), np.clip(r, -1.0, 1.0)], axis=1)
+    pcm = np.clip(data * 32767.0, -32768, 32767).astype('<i2')
+    with wave.open(str(path), 'wb') as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(int(sr))
+        w.writeframes(pcm.tobytes())
+
+
+def _fft_convolve(x, h):
+    n = len(x) + len(h) - 1
+    nfft = 1 << (n - 1).bit_length()
+    y = np.fft.irfft(np.fft.rfft(x, nfft) * np.fft.rfft(h, nfft), nfft)
+    return y[:len(x)]
+
+
+def _lowpass_ir(cutoff, sr, tail=1e-4):
+    a = math.exp(-2.0 * math.pi * cutoff / sr)
+    if a <= 0.0 or a >= 1.0:
+        return np.ones(1, dtype=np.float32)
+    taps = max(1, min(int(math.log(tail) / math.log(a)) + 1, sr))
+    n = np.arange(taps, dtype=np.float32)
+    h = (1.0 - a) * (a ** n)
+    return (h / h.sum()).astype(np.float32)
+
+
+def _lowpass(x, cutoff, sr):
+    if cutoff >= sr * 0.45:
+        return x
+    return _fft_convolve(x, _lowpass_ir(cutoff, sr))
+
+
+def _tube_drive(l, r, amount):
+    pre = 1.0 + 0.9 * amount
+    def shape(x):
+        return np.tanh(pre * (x + 0.10 * x * x))
+    yl = shape(l)
+    yr = shape(r)
+    yl -= yl.mean()
+    yr -= yr.mean()
+    return yl, yr
+
+
+def _echo_pingpong(l, r, sr, time_s, fb, damp_hz, mix):
+    n = len(l)
+    d = max(1, int(time_s * sr))
+    src = 0.5 * (l + r)
+    out_l = np.zeros(n, dtype=np.float32)
+    out_r = np.zeros(n, dtype=np.float32)
+    gain = 1.0
+    for k in range(1, 25):
+        gain *= fb
+        if gain < 0.02 or k * d >= n:
+            break
+        src = _lowpass(src, damp_hz, sr)
+        tap = np.zeros(n, dtype=np.float32)
+        tap[k * d:] = src[:n - k * d]
+        if k % 2:
+            out_r += tap * gain
+        else:
+            out_l += tap * gain
+    return l + out_l * mix, r + out_r * mix
+
+
+def _void_reverb(l, r, sr, mix, tone_hz):
+    n = len(l)
+    rng = np.random.default_rng(20471)
+    wet_l = np.zeros(n, dtype=np.float32)
+    wet_r = np.zeros(n, dtype=np.float32)
+    early = [int(sr * t) for t in (0.011, 0.023, 0.037, 0.053, 0.071, 0.089)]
+    late_count = 26
+    late_max = int(sr * 1.35)
+    late = sorted(rng.integers(int(sr * 0.045), max(int(sr * 0.05), late_max), size=late_count).tolist())
+    delays = [d for d in early + late if 0 < d < n]
+    gains = []
+    for d in delays:
+        base = math.exp(-3.2 * d / max(late_max, 1))
+        gains.append(base * (0.55 + 0.45 * rng.random()) * (1.0 if rng.random() > 0.5 else -1.0))
+    for d, g in zip(delays, gains):
+        wet_l[d:] += l[:n - d] * g
+        wet_r[d:] += r[:n - d] * (g * 0.82 + 0.18 * -g)
+    wet_l = _lowpass(wet_l, tone_hz, sr)
+    wet_r = _lowpass(wet_r, tone_hz * 0.92, sr)
+    return l + wet_l * mix, r + wet_r * mix
+
+
+def _tremolo(l, r, sr, rate, depth):
+    t = np.arange(len(l), dtype=np.float32) / sr
+    m = 1.0 - depth + depth * (0.5 + 0.5 * np.sin(2.0 * np.pi * rate * t))
+    return l * m, r * m
+
+
+def _vibrato(l, r, sr, rate, depth_ms):
+    n = len(l)
+    d = depth_ms / 1000.0 * sr
+    t = np.arange(n, dtype=np.float32) / sr
+    mod = d * (0.5 + 0.5 * np.sin(2.0 * np.pi * rate * t))
+    idx = np.arange(n, dtype=np.float32) - mod
+    i0 = np.clip(np.floor(idx).astype(np.int64), 0, n - 1)
+    i1 = np.clip(i0 + 1, 0, n - 1)
+    frac = (idx - np.floor(idx))[:, None]
+    yl = l[i0] * (1.0 - frac[:, 0]) + l[i1] * frac[:, 0]
+    yr = r[i0] * (1.0 - frac[:, 0]) + r[i1] * frac[:, 0]
+    return yl.astype(np.float32), yr.astype(np.float32)
+
+
+def _stft_complex(x, n_fft=2048, hop=512):
+    win = np.hanning(n_fft).astype(np.float32)
+    pad = n_fft // 2
+    xp = np.pad(x, (pad, pad))
+    n_frames = 1 + max(0, (len(xp) - n_fft) // hop)
+    idx = np.arange(n_fft)[None, :] + hop * np.arange(n_frames)[:, None]
+    return np.fft.rfft(xp[idx] * win[None, :], axis=1), n_frames
+
+
+def _istft_complex(S, n_fft, hop, length):
+    win = np.hanning(n_fft).astype(np.float32)
+    frames = np.fft.irfft(S, n=n_fft, axis=1)
+    pad = n_fft // 2
+    total = pad + length + n_fft + hop
+    out = np.zeros(total, dtype=np.float32)
+    wsum = np.zeros(total, dtype=np.float32)
+    for i in range(frames.shape[0]):
+        out[i * hop:i * hop + n_fft] += frames[i] * win
+        wsum[i * hop:i * hop + n_fft] += win * win
+    wsum = np.where(wsum < 1e-8, 1.0, wsum)
+    return (out / wsum)[pad:pad + length]
+
+
+def _slash_sweep(l, r, sr, gain):
+    n = len(l)
+    n_fft, hop = 2048, 512
+    S_l, nf = _stft_complex(l, n_fft, hop)
+    S_r, _ = _stft_complex(r, n_fft, hop)
+    bins = S_l.shape[1]
+    freqs = np.linspace(0.0, sr / 2.0, bins)
+    logf = np.log2(np.maximum(freqs, 20.0))
+    t_norm = np.linspace(0.0, 1.0, nf)[:, None]
+    sweeps = [(0.06, 0.5, 12.6, 80.0, 1.0), (0.56, 0.5, 12.6, 80.0, -1.0)]
+    mask = np.zeros((nf, bins), dtype=np.float32)
+    for start, dur, f_top, f_bot, direction in sweeps:
+        u = np.clip((t_norm - start) / dur, 0.0, 1.0)
+        active = (u > 0.02) & (u < 0.98)
+        u = u * direction + (1.0 - direction) * (1.0 - u)
+        center = f_top * (f_bot / f_top) ** u[:, 0]
+        env = np.exp(-0.5 * ((logf[None, :] - np.log2(center)[:, None]) / 0.55) ** 2)
+        fade = np.sin(np.pi * np.clip((t_norm - start) / dur, 0.0, 1.0))[:, 0]
+        mask += (env * fade * active[:, 0]).astype(np.float32)
+    S_l = S_l * (1.0 + 2.2 * mask)
+    S_r = S_r * (1.0 + 2.2 * mask)
+    yl = _istft_complex(S_l, n_fft, hop, n)
+    yr = _istft_complex(S_r, n_fft, hop, n)
+    peak = max(float(np.max(np.abs(yl))), float(np.max(np.abs(yr))), 1e-6)
+    if peak > 1.0:
+        yl /= peak
+        yr /= peak
+    return l + yl * gain, r + yr * gain
+
+
+def _neon_eq(l, r, sr, air, sub):
+    mono = 0.5 * (l + r)
+    if sub != 1.0:
+        low = _lowpass(mono, 95.0, sr)
+        l = l + low * (sub - 1.0)
+        r = r + low * (sub - 1.0)
+    if air > 0.0:
+        hi_l = l - _lowpass(l, 6800.0, sr)
+        hi_r = r - _lowpass(r, 6800.0, sr)
+        l = l + hi_l * air
+        r = r + hi_r * air
+    return l, r
+
+
+def _widen(l, r, amount):
+    mid = 0.5 * (l + r)
+    side = 0.5 * (l - r) * (1.0 + amount)
+    return mid + side, mid - side
+
+
+def _neon_limit(l, r):
+    peak = max(float(np.max(np.abs(l))), float(np.max(np.abs(r))), 1e-9)
+    norm = 0.92 / peak
+    l = np.tanh(l * norm * 1.1) / math.tanh(1.1)
+    r = np.tanh(r * norm * 1.1) / math.tanh(1.1)
+    peak2 = max(float(np.max(np.abs(l))), float(np.max(np.abs(r))), 1e-9)
+    if peak2 > 0.92:
+        l *= 0.92 / peak2
+        r *= 0.92 / peak2
+    return l, r
+
+
+def neonize_audio_sound(input_path, output_path, opts, step_bar=None):
+    def step(msg):
+        if step_bar:
+            step_bar.update(msg)
+        else:
+            progress.set_step(msg)
+            progress.print_status()
+
+    l, r, sr = decode_audio_stereo(input_path)
+    if l is None:
         raise RuntimeError(f"Could not decode audio from: {input_path}")
-    if step_bar:
-        step_bar.update("Analyzing spectrum...")
-    mag = stft_magnitude(x, n_fft=2048, hop=512)
-    if mag is None:
-        raise RuntimeError("Audio too short to analyze")
-    logm = np.log1p(mag * 4.0)
-    peak = max(np.percentile(logm, 99.6), 1e-6)
-    energy = np.clip(logm / peak, 0.0, 1.0)
-    n_bins = energy.shape[1]
-    rows = 512
-    fmin, fmax = 2, n_bins - 1
-    row_bins = np.geomspace(fmin, fmax, rows)
-    b0 = np.floor(row_bins).astype(int)
-    b1 = np.clip(b0 + 1, 0, n_bins - 1)
-    w1 = row_bins - b0
-    spec = energy[:, b0] * (1.0 - w1[None, :]) + energy[:, b1] * w1[None, :]
-    spec = spec.T[::-1]
-    target_w = min(spec.shape[1], 2400)
-    spec = _resize_width(spec, target_w)
-    lut = torch.from_numpy(build_palette_lut(opts.palette)).to(get_device())
-    energy_t = torch.from_numpy(spec.astype(np.float32))[None, None].to(get_device())
-    idx = torch.clamp((energy_t * 255.0).long(), 0, 255)
-    color = lut[idx].permute(0, 4, 1, 2, 3).squeeze(2)
-    emag, _ = sobel_field(gaussian_blur(energy_t, 1.0))
-    contour = smoothstep(0.10, 0.32, emag) * 0.5
-    color = color + contour * 0.4
-    color = bloom_color(color, glow=opts.glow * 0.9, env=1.0)
-    img = to_img(color)
-    cv2.imwrite(output_path, img)
+    profile = AUDIO_PROFILES[opts.palette]
+    glow = float(opts.glow)
+    wet = float(np.clip(0.55 + 0.45 * glow, 0.35, 1.7))
 
-
-def neonize_audio_anim(input_path, output_path, opts, step_bar=None):
-    x, sr = decode_audio_pcm(input_path, sr=22050)
-    if x is None:
-        raise RuntimeError(f"Could not decode audio from: {input_path}")
-    fps = 30
-    hop = int(sr / fps)
-    n_fft = 4096
-    mag = stft_magnitude(x, n_fft=n_fft, hop=hop)
-    if mag is None:
-        raise RuntimeError("Audio too short to analyze")
-    total_frames = mag.shape[0]
-    n_bins = mag.shape[1]
-    band_edges = np.unique(np.geomspace(2, n_bins - 1, 65).astype(int))
-    bands = len(band_edges) - 1
-    band_values = np.stack([mag[:, band_edges[i]:band_edges[i + 1]].mean(axis=1) for i in range(bands)], axis=1)
-    logb = np.log1p(band_values * 3.0)
-    peak = max(np.percentile(logb, 99.0), 1e-6)
-    band_norm = np.clip(logb / peak, 0.0, 1.0)
-    lut_u8 = (build_palette_lut(opts.palette) * 255.0).clip(0, 255).astype(np.uint8)
-    width, height = 1280, 720
-    margin_x = 40
-    bar_w = (width - 2 * margin_x) / bands
-    cy = height // 2
-    frames_dir = os.path.join(TEMP_DIR, "audio_anim")
-    if os.path.exists(TEMP_DIR):
-        shutil.rmtree(TEMP_DIR)
-    os.makedirs(frames_dir, exist_ok=True)
-    try:
-        for i in tqdm(range(total_frames), desc="Neonizing audio", unit="frame",
-                      bar_format="{l_bar}{bar:30}{r_bar}"):
-            canvas = np.zeros((height, width, 3), dtype=np.uint8)
-            grad = np.linspace(0.0, 1.0, height).reshape(-1, 1, 1)
-            base_top = np.array([8, 6, 14], dtype=np.float32)
-            base_bottom = np.array([2, 2, 4], dtype=np.float32)
-            canvas += (base_bottom * (1.0 - grad) + base_top * grad).astype(np.uint8)
-            cv2.line(canvas, (margin_x, cy), (width - margin_x, cy), (36, 30, 46), 1, cv2.LINE_AA)
-            for b in range(bands):
-                v = float(band_norm[i, b])
-                if v < 0.015:
-                    continue
-                bh = int((v ** 1.15) * (height * 0.44))
-                if bh < 2:
-                    continue
-                x0 = int(margin_x + b * bar_w + bar_w * 0.18)
-                x1 = int(margin_x + (b + 1) * bar_w - bar_w * 0.18)
-                color = lut_u8[int(v * 255)][::-1].tolist()
-                cv2.rectangle(canvas, (x0, cy - bh), (x1, cy + bh), tuple(color), -1)
-                cap_color = (255, 255, 255) if v > 0.82 else tuple(min(255, c + 70) for c in color)
-                cv2.rectangle(canvas, (x0, cy - bh - 3), (x1, cy - bh), tuple(cap_color), -1)
-                cv2.rectangle(canvas, (x0, cy + bh), (x1, cy + bh + 3), tuple(cap_color), -1)
-            t = to_tensor(canvas)
-            out_t = bloom_color(t, glow=opts.glow, env=1.0)
-            frame = to_img(out_t)
-            cv2.imwrite(os.path.join(frames_dir, f'{i:08d}.png'), frame)
-        frames_to_video(frames_dir, output_path, fps, audio_path=input_path, desc="Compiling video")
-    finally:
-        if os.path.exists(TEMP_DIR):
-            shutil.rmtree(TEMP_DIR, ignore_errors=True)
+    step("Tube glow drive")
+    l, r = _tube_drive(l, r, profile['drive'] * (0.7 + 0.3 * glow))
+    step("Neon EQ")
+    l, r = _neon_eq(l, r, sr, profile['air'], 1.0 + (profile['sub'] - 1.0) * wet)
+    step("Slash sweeps")
+    l, r = _slash_sweep(l, r, sr, profile['slash'] * wet)
+    step("Ping-pong echoes")
+    l, r = _echo_pingpong(l, r, sr, profile['echo_time'], min(profile['echo_fb'] * wet, 0.72),
+                          profile['echo_damp'], min(0.9 * wet, 0.85))
+    step("Void reverb")
+    l, r = _void_reverb(l, r, sr, min(profile['void_mix'] * wet, 0.9), profile['void_tone'])
+    step("Pulse and shimmer")
+    l, r = _tremolo(l, r, sr, profile['trem_rate'], profile['trem_depth'] * min(wet, 1.2))
+    l, r = _vibrato(l, r, sr, profile['vib_rate'], profile['vib_ms'] * min(wet, 1.3))
+    step("Wide neon stage")
+    l, r = _widen(l, r, profile['width'] * min(wet, 1.2))
+    l, r = _neon_limit(l, r)
+    step("Writing neon audio")
+    write_wav_stereo(output_path, l, r, sr)
+    return output_path
 
 
 def parse_obj_mesh(path):
@@ -1068,8 +1237,7 @@ def display_path_summary(categorized, max_display=5):
 def default_output_for(input_path, command, opts):
     p = Path(input_path)
     if command == 'audio':
-        ext = '.mp4' if opts.anim else '.png'
-        return str(p.parent / f"{p.stem}_neon{ext}")
+        return str(p.parent / f"{p.stem}_neon.wav")
     if command == 'mesh':
         if opts.turntable > 0:
             return str(p.parent / f"{p.stem}_neon_turntable.mp4")
@@ -1085,8 +1253,6 @@ def output_for_arg(input_path, output_arg, command, opts):
                  (output_path.suffix == '' and not output_path.exists()))
     if is_folder:
         return str(output_path / Path(default_output_for(input_path, command, opts)).name)
-    if command == 'audio' and opts.anim and output_path.suffix.lower() not in VIDEO_EXTENSIONS:
-        return str(output_path) + '.mp4'
     return str(output_arg)
 
 
@@ -1157,10 +1323,7 @@ def process_single_file(input_path, output_path, command, opts, step_bar=None):
     elif command == 'audio':
         if not is_audio(str(input_path)):
             raise ValueError(f"'audio' works on audio files, got: {input_path.suffix}")
-        if opts.anim:
-            neonize_audio_anim(str(input_path), str(output_path), opts, step_bar=step_bar)
-        else:
-            neonize_audio_file(str(input_path), str(output_path), opts, step_bar=step_bar)
+        neonize_audio_sound(str(input_path), str(output_path), opts, step_bar=step_bar)
     elif command == 'mesh':
         if not is_mesh(str(input_path)):
             raise ValueError(f"'mesh' works on .obj and .stl files, got: {input_path.suffix}")
@@ -1311,19 +1474,6 @@ def select_pulse():
         print(f"Invalid choice '{choice}'. Please enter 1, 2, or 3.")
 
 
-def select_audio_mode():
-    print("\nAudio output type:")
-    print("  1. Neon spectrogram art (PNG, default)")
-    print("  2. Animated spectrum video (MP4 with the original audio)")
-    while True:
-        choice = input("\nSelect output type (1-2, default 1): ").strip()
-        if choice == '' or choice == '1':
-            return 'art'
-        if choice == '2':
-            return 'anim'
-        print(f"Invalid choice '{choice}'. Please enter 1 or 2.")
-
-
 def select_mesh_mode():
     print("\nMesh output type:")
     print("  1. Single neon wireframe view (PNG, default)")
@@ -1445,9 +1595,11 @@ def interactive_mode():
             print("\n" + "-"*60)
             print("AUDIO SETTINGS")
             print("-"*60)
-            opts.anim = select_audio_mode() == 'anim'
-        else:
-            opts.anim = False
+            print(f"\nNeon audio FX profile: {opts.palette}")
+            print("  tube glow drive, ping-pong echoes, void reverb,")
+            print("  pulse tremolo, shimmer vibrato, slash sweeps")
+            print("  intensity follows the Glow setting")
+            print("  output: <name>_neon.wav (stereo 44.1kHz)")
         if files_by_type['meshes']:
             print("\n" + "-"*60)
             print("MESH SETTINGS")
@@ -1560,8 +1712,7 @@ Examples:
   neonify cli                              # Interactive CLI mode
   neonify neon photo.jpg                   # Neonize an image
   neonify neon clip.mp4 --pulse on         # Neonize video, glow pulses to the beat
-  neonify audio song.mp3                   # Neon spectrogram art
-  neonify audio song.mp3 --anim            # Animated spectrum video with audio
+  neonify audio song.mp3                   # Neonized audio: echoes, void, pulse
   neonify mesh model.obj --turntable 120   # Neon wireframe turntable
   neonify neon art.png --palette synthwave --glow 1.6 -o out.png
         """
@@ -1578,8 +1729,6 @@ Examples:
                         help="Edge detection threshold (0.02-0.5, default 0.12)")
     parser.add_argument('--pulse', choices=['auto', 'on', 'off'], default='auto',
                         help="Audio-reactive glow pulse for videos (default: auto)")
-    parser.add_argument('--anim', action='store_true',
-                        help="Audio: render animated spectrum video instead of spectrogram art")
     parser.add_argument('--turntable', type=int, default=0,
                         help="Mesh: render an orbit video with N frames instead of a single view")
     parser.add_argument('--azimuth', type=float, default=30.0,

@@ -46,9 +46,6 @@ cd neonify
 | `neonify.exe` | Main binary — launches GUI (double-click to open) |
 | `cli.bat` | Opens interactive CLI mode |
 | `cmd.bat` | Opens a command prompt in the Neonify folder |
-| `install.bat` | Creates desktop shortcut, Start Menu entry, and adds Neonify to PATH |
-
-> After running `install.bat`, you can open a **new** command prompt and use `neonify` from anywhere.
 
 ---
 
@@ -67,8 +64,24 @@ neonify/
 ├── neonify / neonify.exe ← main binary (GUI + CLI, icon embedded)
 ├── _internal/            ← Python runtime + all dependencies
 ├── cli.sh / cli.bat      ← launch interactive CLI mode
-└── install.sh / install.bat ← shortcut & alias installer
+├── install.sh            ← desktop shortcut & shell alias (Linux)
+└── cmd.bat               ← open a terminal in the Neonify folder (Windows)
 ```
+
+---
+
+## 🔊 Neon Audio
+
+`neonify audio track.mp3` re-synthesizes the sound itself — the output is a real neonized audio file (`track_neon.wav`, stereo 44.1 kHz), not a picture:
+
+- **Tube glow drive** — warm asymmetric saturation, like a neon sign buzzing to life
+- **Ping-pong echoes** — damped echoes bouncing left ↔ right
+- **Void reverb** — a deep, dark space under the track
+- **Pulse tremolo + shimmer vibrato** — the neon breathing
+- **Slash sweeps** — two resonant filter slashes across the spectrum
+- **Wide neon stage** — mid/side widening, sub rumble and air shelf
+
+Every palette is also a sound profile — `ghost` is a haunted dark void, `toxic` bites, `ice` shimmers, `fire` rumbles. The Glow setting drives the FX intensity.
 
 ---
 
@@ -82,7 +95,7 @@ neonify neon art.png --palette synthwave --glow 1.6
 
 # Audio
 neonify audio song.mp3
-neonify audio song.mp3 --anim
+neonify audio song.mp3 --palette ghost
 
 # 3D meshes
 neonify mesh model.obj --turntable 120

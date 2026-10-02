@@ -14,12 +14,18 @@ from PyQt5.QtWidgets import (
     QMessageBox, QGroupBox, QListWidget, QStackedWidget
 )
 from PyQt5.QtCore import (
-    Qt, QTimer, QThread, pyqtSignal, QRectF, QRect, QPoint
+    Qt, QTimer, QThread, pyqtSignal, QRectF, QRect, QPoint, QUrl
 )
 from PyQt5.QtGui import (
     QPixmap, QImage, QPainter, QColor, QPen, QBrush, QFont,
     QPalette, QIcon
 )
+
+try:
+    from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+    HAS_MULTIMEDIA = True
+except ImportError:
+    HAS_MULTIMEDIA = False
 
 THEME = {
     'background': '#0A0A0A',
@@ -486,6 +492,60 @@ class ImageComparisonSlider(QWidget):
         self._move_slider = False
 
 
+class AudioWaveWidget(QWidget):
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.before_env = None
+        self.after_env = None
+        self.colors = PALETTE_WAVE_COLORS['electric']
+        self.setMinimumSize(400, 300)
+        self.setStyleSheet(f"background-color: {THEME['surface']}; border: 1px solid {THEME['border']}; border-radius: 6px;")
+
+    def setAudio(self, before_env, after_env, palette):
+        self.before_env = before_env
+        self.after_env = after_env
+        self.colors = PALETTE_WAVE_COLORS.get(palette, PALETTE_WAVE_COLORS['electric'])
+        self.update()
+
+    def _bar_color(self, v):
+        c0, c1, c2 = self.colors
+        if v < 0.7:
+            t = v / 0.7
+            return tuple(int(c0[i] + (c1[i] - c0[i]) * t) for i in range(3))
+        t = (v - 0.7) / 0.3
+        return tuple(int(c1[i] + (c2[i] - c1[i]) * t) for i in range(3))
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor(THEME['surface']))
+        w, h = self.width(), self.height()
+        cy = h // 2
+        painter.setPen(QPen(QColor(THEME['border']), 1))
+        painter.drawLine(0, cy, w, cy)
+        env = self.after_env
+        if env is None or len(env) == 0:
+            painter.setPen(QPen(QColor(THEME['text_secondary'])))
+            painter.drawText(self.rect(), Qt.AlignCenter, "No audio preview")
+            painter.end()
+            return
+        n = len(env)
+        bar_w = w / n
+        if self.before_env is not None and len(self.before_env) == n:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(84, 84, 92, 110))
+            for i, v in enumerate(self.before_env):
+                bh = max(1, int(v * h * 0.40))
+                painter.drawRect(QRect(int(i * bar_w), cy - bh, max(1, int(bar_w) - 1), 2 * bh))
+        painter.setPen(Qt.NoPen)
+        for i, v in enumerate(env):
+            bh = max(1, int(v * h * 0.44))
+            painter.setBrush(QColor(*self._bar_color(float(v))))
+            painter.drawRect(QRect(int(i * bar_w), cy - bh, max(1, int(bar_w) - 1), 2 * bh))
+        painter.end()
+
+
 class ProcessingThread(QThread):
     progress_update = pyqtSignal(int, str)
     processing_complete = pyqtSignal(list, bool)
@@ -576,6 +636,34 @@ AUDIO_EXTS = {'.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.wma', '.opus'}
 MESH_EXTS = {'.obj', '.stl'}
 SUPPORTED_EXTS = IMAGE_EXTS | VIDEO_EXTS | AUDIO_EXTS | MESH_EXTS
 PALETTE_NAMES = ['electric', 'synthwave', 'toxic', 'ice', 'fire', 'ghost', 'spectrum']
+PALETTE_WAVE_COLORS = {
+    'electric': ((14, 54, 200), (70, 190, 255), (240, 252, 255)),
+    'synthwave': ((110, 18, 180), (250, 60, 150), (255, 232, 214)),
+    'toxic': ((18, 110, 28), (110, 240, 60), (228, 255, 214)),
+    'ice': ((36, 74, 142), (140, 205, 245), (255, 255, 255)),
+    'fire': ((172, 22, 4), (255, 118, 14), (255, 246, 224)),
+    'ghost': ((86, 86, 94), (198, 201, 208), (255, 255, 255)),
+    'spectrum': ((198, 38, 122), (250, 190, 60), (88, 220, 180)),
+}
+
+
+def audio_envelope(path, points=1000):
+    try:
+        import numpy as np
+        cmd = ['ffmpeg', '-y', '-loglevel', 'error', '-i', str(path),
+               '-vn', '-ac', '1', '-ar', '8000', '-f', 's16le', 'pipe:1']
+        result = subprocess.run(cmd, capture_output=True, timeout=600)
+        if result.returncode != 0 or len(result.stdout) < 2048:
+            return None
+        x = np.frombuffer(result.stdout, dtype='<i2').astype(np.float32) / 32768.0
+        if len(x) < points:
+            return None
+        buckets = np.array_split(x, points)
+        env = np.array([float(np.sqrt(np.mean(b ** 2))) if len(b) else 0.0 for b in buckets], dtype=np.float32)
+        peak = max(float(np.percentile(env, 99.0)), 1e-6)
+        return np.clip(env / peak, 0.0, 1.0)
+    except Exception:
+        return None
 
 
 def detect_command(path):
@@ -589,11 +677,10 @@ def detect_command(path):
     return None
 
 
-def default_output_for(path, command, anim=False, turntable=0):
+def default_output_for(path, command, turntable=0):
     p = Path(path)
     if command == 'audio':
-        ext = '.mp4' if anim else '.png'
-        return str(p.parent / f"{p.stem}_neon{ext}")
+        return str(p.parent / f"{p.stem}_neon.wav")
     if command == 'mesh':
         if turntable > 0:
             return str(p.parent / f"{p.stem}_neon_turntable.mp4")
@@ -665,7 +752,13 @@ class NeonifyGUI(QMainWindow):
         self.processor = None
         self.last_input = None
         self.last_output = None
+        self.last_palette = 'electric'
         self.temp_preview = None
+        self.media_player = None
+        if HAS_MULTIMEDIA:
+            self.media_player = QMediaPlayer()
+            self.media_player.stateChanged.connect(self._on_player_state)
+            self.media_player.error.connect(self._on_media_error)
         self.setWindowTitle(f"NEONIFY — Procedural Neon Art Tool")
         self.setWindowIcon(load_app_icon())
         self.setStyleSheet(f"QMainWindow {{ background-color: {THEME['background']}; }}")
@@ -792,9 +885,6 @@ class NeonifyGUI(QMainWindow):
         thr_box.addWidget(self.thr_slider)
         settings.addLayout(thr_box)
 
-        self.anim_check = QCheckBox("Audio → animated spectrum video (MP4)")
-        self.anim_check.setStyleSheet(get_checkbox_style())
-        settings.addWidget(self.anim_check)
         self.turntable_check = QCheckBox("Mesh → turntable orbit video (MP4)")
         self.turntable_check.setStyleSheet(get_checkbox_style())
         settings.addWidget(self.turntable_check)
@@ -843,16 +933,24 @@ class NeonifyGUI(QMainWindow):
         self.preview_mode_btn.setStyleSheet(get_surface_button_style())
         self.preview_mode_btn.setEnabled(False)
         self.preview_mode_btn.clicked.connect(self._toggle_preview_mode)
+        self.play_btn = QPushButton("Play")
+        self.play_btn.setStyleSheet(get_surface_button_style())
+        self.play_btn.setEnabled(False)
+        self.play_btn.setVisible(False)
+        self.play_btn.clicked.connect(self._toggle_play)
         preview_header.addWidget(preview_title)
         preview_header.addStretch()
+        preview_header.addWidget(self.play_btn)
         preview_header.addWidget(self.preview_mode_btn)
         preview_layout.addLayout(preview_header)
 
         self.preview_stack = QStackedWidget()
         self.comparison = ImageComparisonSlider()
         self.viewer = ScrollableImageViewer()
+        self.audio_wave = AudioWaveWidget()
         self.preview_stack.addWidget(self.comparison)
         self.preview_stack.addWidget(self.viewer)
+        self.preview_stack.addWidget(self.audio_wave)
         preview_layout.addWidget(self.preview_stack, 1)
 
         self.preview_caption = QLabel("Results appear here after processing")
@@ -914,9 +1012,8 @@ class NeonifyGUI(QMainWindow):
             command = self._mode_for(p)
             if command is None:
                 continue
-            anim = self.anim_check.isChecked() and command == 'audio'
             turntable = 120 if (self.turntable_check.isChecked() and command == 'mesh') else 0
-            output = default_output_for(p, command, anim=anim, turntable=turntable)
+            output = default_output_for(p, command, turntable=turntable)
             args = list(base) + [
                 command, p,
                 '--json-progress',
@@ -926,8 +1023,6 @@ class NeonifyGUI(QMainWindow):
                 '--device', self._device_arg(),
                 '-o', output,
             ]
-            if anim:
-                args.append('--anim')
             if turntable > 0:
                 args.extend(['--turntable', str(turntable)])
             commands.append(args)
@@ -937,6 +1032,7 @@ class NeonifyGUI(QMainWindow):
             return
         self.process_btn.setEnabled(False)
         self.preview_mode_btn.setEnabled(False)
+        self.last_palette = self.palette_combo.currentData()
         self.progress_bar.setValue(0)
         self.status_label.setText(f"Processing {len(commands)} file(s)...")
         self.processor = ProcessingThread(commands, cwd, inputs)
@@ -998,6 +1094,22 @@ class NeonifyGUI(QMainWindow):
         ext = p.suffix.lower()
         after_pixmap = None
         before_pixmap = None
+        if ext in AUDIO_EXTS:
+            if self.media_player is not None:
+                self.media_player.stop()
+                self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(str(p))))
+            after_env = audio_envelope(str(p))
+            before_env = audio_envelope(self.last_input) if self.last_input and Path(self.last_input).exists() else None
+            self.audio_wave.setAudio(before_env, after_env, self.last_palette)
+            self.preview_stack.setCurrentWidget(self.audio_wave)
+            self.preview_mode_btn.setEnabled(False)
+            self.play_btn.setVisible(True)
+            self.play_btn.setEnabled(HAS_MULTIMEDIA)
+            self.preview_caption.setText(f"Audio preview — {p.name}" + ("  (gray: source, neon: result)" if before_env is not None else ""))
+            return
+        self.play_btn.setVisible(False)
+        if self.media_player is not None:
+            self.media_player.stop()
         if ext in VIDEO_EXTS:
             after_pixmap = self._extract_video_frame(str(p))
             if self.last_input and Path(self.last_input).exists() and Path(self.last_input).suffix.lower() in VIDEO_EXTS:
@@ -1037,6 +1149,24 @@ class NeonifyGUI(QMainWindow):
             self.preview_stack.setCurrentWidget(self.comparison)
             self.preview_mode_btn.setText("Result only")
 
+    def _toggle_play(self):
+        if self.media_player is None:
+            return
+        if self.media_player.state() == QMediaPlayer.PlayingState:
+            self.media_player.pause()
+        else:
+            self.media_player.play()
+
+    def _on_player_state(self, state):
+        if state == QMediaPlayer.PlayingState:
+            self.play_btn.setText("Pause")
+        else:
+            self.play_btn.setText("Play")
+
+    def _on_media_error(self, *args):
+        self.play_btn.setEnabled(False)
+        self.preview_caption.setText(self.preview_caption.text() + "  — playback unavailable on this system")
+
     def _open_folder(self):
         if not self.last_output:
             return
@@ -1046,6 +1176,8 @@ class NeonifyGUI(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
     def closeEvent(self, event):
+        if self.media_player is not None:
+            self.media_player.stop()
         if self.processor is not None and self.processor.isRunning():
             self.processor.cancel()
             self.processor.wait(3000)
