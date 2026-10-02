@@ -32,7 +32,7 @@
 # Linux:   ./neonify (GUI), or ./neonify cli (interactive CLI)
 ```
 
-The native build is a single executable per platform (built with Qt 5.15). On Windows the ffmpeg tool ships in the zip and stays next to the exe; on Linux install it with your package manager.
+The native build is a single executable per platform (built with Qt 5.15). ffmpeg is not bundled — install it once with your package manager (`winget install FFmpeg` on Windows).
 
 ### Option 2: Run from Source (Python)
 

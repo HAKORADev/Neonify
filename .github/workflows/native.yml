@@ -92,10 +92,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist\neonify | Out-Null
           Copy-Item build\Release\neonify.exe dist\neonify\
-          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile D:\ff.zip
-          Expand-Archive D:\ff.zip -DestinationPath D:\ff
-          $ff = Get-ChildItem D:\ff -Recurse -Filter ffmpeg.exe | Select-Object -First 1
-          Copy-Item $ff.FullName dist\neonify\
           Copy-Item packaging\windows\cli.bat dist\neonify\
           Copy-Item packaging\windows\cmd.bat dist\neonify\
           $readme = @"
@@ -104,17 +100,17 @@ jobs:
           neonify.exe   the app. double-click = gui
           cli.bat       interactive cli
           cmd.bat       terminal here
-          ffmpeg.exe    needed for video/audio (keep next to neonify.exe)
+          ffmpeg        needed for video/audio. install once: winget install FFmpeg
 
           outputs land in results\ next to the app. everything runs on cpu.
           "@
           $readme | Out-File -Encoding utf8 dist\neonify\README.txt
-          Compress-Archive -Path dist\neonify -DestinationPath "neonify windows cpp v${{ inputs.version }}.zip"
+          Compress-Archive -Path dist\neonify -DestinationPath "neonify-windows-cpp-v${{ inputs.version }}.zip"
 
       - uses: actions/upload-artifact@v4
         with:
           name: neonify-windows-cpp
-          path: neonify windows cpp v${{ inputs.version }}.zip
+          path: neonify-windows-cpp-v${{ inputs.version }}.zip
 
   linux-cpp:
     runs-on: ubuntu-22.04
@@ -204,12 +200,12 @@ jobs:
 
           outputs land in results/ next to the app. everything runs on cpu.
           EOF
-          tar -czf "neonify linux cpp v${{ inputs.version }}.tar.gz" -C dist neonify
+          tar -czf "neonify-linux-cpp-v${{ inputs.version }}.tar.gz" -C dist neonify
 
       - uses: actions/upload-artifact@v4
         with:
           name: neonify-linux-cpp
-          path: neonify linux cpp v${{ inputs.version }}.tar.gz
+          path: neonify-linux-cpp-v${{ inputs.version }}.tar.gz
 
   windows-python:
     runs-on: windows-latest
@@ -241,11 +237,11 @@ jobs:
           outputs land in results\ next to the app.
           "@
           $readme | Out-File -Encoding utf8 dist\neonify\README.txt
-          Compress-Archive -Path dist\neonify -DestinationPath "neonify windows python v${{ inputs.version }}.zip"
+          Compress-Archive -Path dist\neonify -DestinationPath "neonify-windows-python-v${{ inputs.version }}.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: neonify-windows-python
-          path: neonify windows python v${{ inputs.version }}.zip
+          path: neonify-windows-python-v${{ inputs.version }}.zip
 
   linux-python:
     runs-on: ubuntu-22.04
@@ -273,11 +269,11 @@ jobs:
 
           outputs land in results/ next to the app.
           EOF
-          tar -czf "neonify linux python v${{ inputs.version }}.tar.gz" -C dist neonify
+          tar -czf "neonify-linux-python-v${{ inputs.version }}.tar.gz" -C dist neonify
       - uses: actions/upload-artifact@v4
         with:
           name: neonify-linux-python
-          path: neonify linux python v${{ inputs.version }}.tar.gz
+          path: neonify-linux-python-v${{ inputs.version }}.tar.gz
 
   release:
     needs: [windows-cpp, linux-cpp, windows-python, linux-python]
@@ -300,8 +296,8 @@ jobs:
             gh api -X DELETE repos/$GITHUB_REPOSITORY/releases/assets/$id
           done
           gh release upload "$TAG" \
-            "pkgs/neonify-windows-cpp/neonify windows cpp v$TAG.zip" \
-            "pkgs/neonify-linux-cpp/neonify linux cpp v$TAG.tar.gz" \
-            "pkgs/neonify-windows-python/neonify windows python v$TAG.zip" \
-            "pkgs/neonify-linux-python/neonify linux python v$TAG.tar.gz" \
+            "pkgs/neonify-windows-cpp/neonify-windows-cpp-v$TAG.zip" \
+            "pkgs/neonify-linux-cpp/neonify-linux-cpp-v$TAG.tar.gz" \
+            "pkgs/neonify-windows-python/neonify-windows-python-v$TAG.zip" \
+            "pkgs/neonify-linux-python/neonify-linux-python-v$TAG.tar.gz" \
             --clobber
