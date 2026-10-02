@@ -3,15 +3,15 @@ import os
 import sys
 
 a = Analysis(
-    ['src/neonify.py'],
-    pathex=['src'],
+    ['src/python/neonify.py'],
+    pathex=['src', 'src/python'],
     binaries=[],
-    datas=[('src/logo.png', '.')],
+    datas=[('src/assets/logo.png', '.')],
     hiddenimports=['gui'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=['packaging/runtime_hook.py'],
-    excludes=[],
+    excludes=['torch', 'torchvision', 'torchaudio', 'tkinter', 'matplotlib', 'numpy.f2py'],
     noarchive=False,
 )
 
@@ -33,7 +33,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

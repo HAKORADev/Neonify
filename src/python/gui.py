@@ -385,7 +385,14 @@ class ScrollableImageViewer(QScrollArea):
 
     def setPixmap(self, pixmap):
         self.pixmap = pixmap
+        self.image_label.setStyleSheet(f"background-color: {THEME['surface']};")
         self.updateImage()
+
+    def show_text(self, text):
+        self.pixmap = None
+        self.image_label.setText(text)
+        self.image_label.setStyleSheet(
+            f"background-color: {THEME['surface']}; color: {THEME['text_secondary']}; font-size: 13px;")
 
     def updateImage(self):
         if self.pixmap:
@@ -728,6 +735,7 @@ def script_base():
 class FileList(QListWidget):
 
     files_added = pyqtSignal()
+    duplicates_skipped = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -750,26 +758,37 @@ class FileList(QListWidget):
             p = url.toLocalFile()
             if p and Path(p).suffix.lower() in SUPPORTED_EXTS:
                 paths.append(p)
-        added = False
+        added = dup = 0
         for p in paths:
             if not self._contains(p):
                 self.addItem(p)
-                added = True
+                added += 1
+            else:
+                dup += 1
         if added:
             self.files_added.emit()
+        if dup:
+            self.duplicates_skipped.emit(dup)
         event.acceptProposedAction()
 
     def _contains(self, path):
         return any(self.item(i).text() == path for i in range(self.count()))
 
     def addPaths(self, paths):
-        added = False
+        added = dup = 0
         for p in paths:
-            if Path(p).suffix.lower() in SUPPORTED_EXTS and not self._contains(p):
-                self.addItem(p)
-                added = True
+            if Path(p).suffix.lower() not in SUPPORTED_EXTS:
+                continue
+            if self._contains(p):
+                dup += 1
+                continue
+            self.addItem(p)
+            added += 1
         if added:
             self.files_added.emit()
+        if dup:
+            self.duplicates_skipped.emit(dup)
+        return added
 
     def allPaths(self):
         return [self.item(i).text() for i in range(self.count())]
@@ -905,6 +924,8 @@ class NeonifyGUI(QMainWindow):
         drop_layout.addWidget(drop_title)
         self.file_list = FileList()
         self.file_list.files_added.connect(self._refresh_states)
+        self.file_list.duplicates_skipped.connect(self._warn_duplicates)
+        self.file_list.itemSelectionChanged.connect(self._preview_selected_input)
         drop_layout.addWidget(self.file_list, 1)
         btn_row = QHBoxLayout()
         add_btn = QPushButton("Add Files")
@@ -1098,6 +1119,51 @@ class NeonifyGUI(QMainWindow):
     def _clear_files(self):
         self.file_list.clear()
         self._refresh_states()
+
+    def _warn_duplicates(self, n):
+        self.status_label.setText(f"{n} file(s) already in the queue — skipped")
+
+    def _preview_selected_input(self):
+        items = self.file_list.selectedItems()
+        if not items:
+            return
+        path = items[0].text()
+        ext = Path(path).suffix.lower()
+        if HAS_MULTIMEDIA:
+            self.media_player.stop()
+        if ext in {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tif', '.tiff'}:
+            pm = QPixmap(path)
+            if not pm.isNull():
+                self.preview_stack.setCurrentWidget(self.viewer)
+                self.viewer.setPixmap(pm)
+                self.preview_caption.setText(f"input — {os.path.basename(path)}")
+                self.play_btn.setVisible(False)
+        elif ext in {'.mp4', '.avi', '.mkv', '.mov', '.webm', '.gif'}:
+            if not HAS_MULTIMEDIA:
+                self.preview_stack.setCurrentWidget(self.viewer)
+                self.viewer.show_text(f"video input — {os.path.basename(path)}\n(QtMultimedia unavailable)")
+                return
+            self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(path)))
+            self.preview_stack.setCurrentWidget(self.viewer)
+            self.viewer.show_text(f"video input — {os.path.basename(path)}\npress Play to preview")
+            self.play_btn.setVisible(True)
+            self.play_btn.setEnabled(True)
+            self.preview_caption.setText(f"video input — {os.path.basename(path)}")
+        elif ext in {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.wma'}:
+            if not HAS_MULTIMEDIA:
+                self.preview_stack.setCurrentWidget(self.viewer)
+                self.viewer.show_text(f"audio input — {os.path.basename(path)}\n(QtMultimedia unavailable)")
+                return
+            self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(path)))
+            self.preview_stack.setCurrentWidget(self.audio_wave)
+            self.play_btn.setVisible(True)
+            self.play_btn.setEnabled(True)
+            self.preview_caption.setText(f"audio input — {os.path.basename(path)}")
+        else:
+            self.preview_stack.setCurrentWidget(self.viewer)
+            self.viewer.show_text(f"3D input — {os.path.basename(path)}\nrenders on process")
+            self.play_btn.setVisible(False)
+            self.preview_caption.setText(f"3D input — {os.path.basename(path)}")
 
     def _refresh_states(self):
         count = len(self.file_list.allPaths())

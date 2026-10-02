@@ -450,18 +450,42 @@ def process_image_neon(img_bgr, palette='electric', glow=1.0, threshold=0.12, en
     return colorize(field, palette), aux
 
 
+def process_image_neon_ex(img_bgr, palette='electric', glow=1.0, threshold=0.12, env=1.0):
+    """same as process_image_neon but also returns the raw intensity field (for alpha)"""
+    edges, aux = edge_field(img_bgr, glow, threshold, env)
+    field = neon_glow_stack(img_bgr, edges, glow=glow, env=env, threshold=threshold)
+    return colorize(field, palette), field, aux
+
+
+def _apply_alpha(neon_bgr, field, alpha):
+    """tubes on transparency: alpha = neon intensity * source alpha"""
+    a = np.clip(field * 1.25, 0.0, 1.0) * alpha
+    bgra = cv2.cvtColor(neon_bgr, cv2.COLOR_BGR2BGRA)
+    bgra[:, :, 3] = (a * 255.0 + 0.5).astype(np.uint8)
+    return bgra
+
+
 def neonize_image_file(inp, out_path, palette='electric', glow=1.0,
                        threshold=0.12, env=1.0, tracker=None):
-    img = cv2.imread(inp, cv2.IMREAD_COLOR)
+    img = cv2.imread(inp, cv2.IMREAD_UNCHANGED)
     if img is None:
         raise RuntimeError(f"cannot read image: {inp}")
+    alpha = None
+    if img.ndim == 3 and img.shape[2] == 4:
+        alpha = img[:, :, 3].astype(np.float32) * (1.0 / 255.0)
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    elif img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
     if tracker:
         tracker.step("neonizing")
-    out, aux = process_image_neon(img, palette, glow, threshold, env)
+    out, field, aux = process_image_neon_ex(img, palette, glow, threshold, env)
+    if alpha is not None:
+        out = _apply_alpha(out, field, alpha)
     if tracker:
         tracker.step("saving")
     out_path = unique_output_path(out_path)
-    cv2.imwrite(out_path, out, [cv2.IMWRITE_PNG_COMPRESSION, 6])
+    if not cv2.imwrite(out_path, out, [cv2.IMWRITE_PNG_COMPRESSION, 6]):
+        raise RuntimeError(f"cannot write image: {out_path}")
     return out_path, aux
 
 
@@ -538,6 +562,15 @@ def decode_audio_stereo(path, sr=AUDIO_SR):
 
 def write_wav_stereo(path, l, r, sr=AUDIO_SR):
     l, r = _normalize_pair(l, r)
+    try:
+        import soundfile as sf
+        data = np.empty((len(l), 2), np.float32)
+        data[:, 0] = l
+        data[:, 1] = r
+        sf.write(path, data, sr, subtype='PCM_16')
+        return
+    except Exception:
+        pass
     data = np.empty((len(l), 2), np.int16)
     data[:, 0] = np.clip(l * 32767, -32768, 32767).astype(np.int16)
     data[:, 1] = np.clip(r * 32767, -32768, 32767).astype(np.int16)
@@ -1120,8 +1153,36 @@ def process_video_file(inp, out_path, palette='electric', glow=1.0, threshold=0.
 # real geometry: mesh → neon wireframe render (no fake shaders). images get
 # REMESHED into displaced relief grids. turntable = real rotation.
 
+def save_mesh_obj(path, verts, faces):
+    """export a mesh as OBJ — trimesh when present, plain writer otherwise"""
+    verts = np.asarray(verts, np.float32)
+    faces = np.asarray(faces, np.int64)
+    try:
+        import trimesh
+        m = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+        m.export(path)
+        return
+    except Exception:
+        pass
+    lines = []
+    for v in verts:
+        lines.append(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}")
+    for f in faces:
+        lines.append(f"f {f[0] + 1} {f[1] + 1} {f[2] + 1}")
+    with open(path, 'w') as fh:
+        fh.write('\n'.join(lines) + '\n')
+
+
 def load_mesh(path):
     """OBJ (v/f), PLY (ascii), STL (ascii/binary) → (verts float32 Nx3, faces Mx3)"""
+    try:
+        import trimesh
+        m = trimesh.load(path, force='mesh', process=False)
+        if m is not None and len(m.vertices) >= 3 and len(m.faces) >= 1:
+            return (np.ascontiguousarray(m.vertices, np.float32),
+                    np.ascontiguousarray(m.faces, np.int64))
+    except Exception:
+        pass
     ext = os.path.splitext(path)[1].lower()
     verts, faces = [], []
     if ext == '.obj':
@@ -1317,7 +1378,8 @@ def neonize_mesh_file(inp, out_path, palette='electric', glow=1.0,
 
 
 def neonize_relief_file(inp, out_path, palette='electric', glow=1.0, depth=0.85,
-                        turntable=48, azimuth=30.0, elevation=35.0, fps=24, tracker=None):
+                        turntable=48, azimuth=30.0, elevation=35.0, fps=24, tracker=None,
+                        export_mesh=False):
     img = cv2.imread(inp, cv2.IMREAD_COLOR)
     if img is None:
         raise RuntimeError(f"cannot read image: {inp}")
@@ -1345,8 +1407,12 @@ def neonize_relief_file(inp, out_path, palette='electric', glow=1.0, depth=0.85,
         tracker.complete_stage(1)
         tracker.begin_stage(2, 'write')
         tracker.step(1.0)
+        if export_mesh:
+            save_mesh_obj(os.path.splitext(out_path)[0] + '_mesh.obj', verts, faces)
         tracker.complete_stage(2)
         tracker.finish()
+    elif export_mesh:
+        save_mesh_obj(os.path.splitext(out_path)[0] + '_mesh.obj', verts, faces)
     return out_path
 
 
@@ -1476,10 +1542,21 @@ def ask_audio_profile(default='slash'):
 
 # ================================================================== flows
 def _out_default(inp, tag, ext=None):
-    """VODER law: default outputs carry _timestamp-to-seconds — collisions die"""
+    """default outputs carry the effect + _timestamp — collisions die, files self-describe"""
     root = os.path.splitext(os.path.basename(inp))[0]
     ext = ext or os.path.splitext(inp)[1].lower()
     return f"{root}_{tag}{timestamp_suffix()}{ext}"
+
+
+def results_dir():
+    """every default output lands in ./results so inputs never mix with outputs"""
+    d = os.path.join(os.getcwd(), 'results')
+    ensure_dir(d)
+    return d
+
+
+def _results_path(name):
+    return os.path.join(results_dir(), name)
 
 
 def _unique_or_default(explicit, fallback):
@@ -1490,7 +1567,7 @@ def flow_image(inputs, opts, tracker):
     outs = []
     for inp in inputs:
         print(f"{NEON_BLUE}\u25b6{NEON_RESET} {os.path.basename(inp)}")
-        fallback = _out_default(inp, 'neon')
+        fallback = _results_path(_out_default(inp, opts['palette']))
         out = _unique_or_default(opts.get('output'), fallback)
         path, aux = neonize_image_file(inp, out, opts['palette'], opts['glow'],
                                        opts['threshold'], opts.get('env', 1.0), tracker)
@@ -1503,7 +1580,7 @@ def flow_video(inputs, opts, tracker):
     outs = []
     for inp in inputs:
         print(f"{NEON_BLUE}\u25b6{NEON_RESET} {os.path.basename(inp)}")
-        fallback = _out_default(inp, 'neon', '.mp4')
+        fallback = _results_path(_out_default(inp, opts['palette'], '.mp4'))
         out = _unique_or_default(opts.get('output'), fallback)
         path, n = process_video_file(inp, out, opts['palette'], opts['glow'], opts['threshold'],
                                      opts.get('env', 1.0), audio_profile=opts.get('audio_profile'),
@@ -1519,7 +1596,7 @@ def flow_audio(inputs, opts, tracker):
     outs = []
     for inp in inputs:
         print(f"{NEON_BLUE}\u25b6{NEON_RESET} {os.path.basename(inp)}")
-        fallback = _out_default(inp, opts.get('audio_profile', 'neon'), '.wav')
+        fallback = _results_path(_out_default(inp, opts.get('audio_profile', 'neon'), '.wav'))
         out = _unique_or_default(opts.get('output'), fallback)
         path = neonize_audio_file(inp, out, opts.get('audio_profile', 'slash'), opts['glow'],
                                   opts.get('advanced_audio'), tracker)
@@ -1533,14 +1610,14 @@ def flow_mesh(inputs, opts, tracker):
     for inp in inputs:
         print(f"{NEON_BLUE}\u25b6{NEON_RESET} {os.path.basename(inp)}")
         ext = '.mp4' if opts.get('turntable') else '.png'
-        fallback = _out_default(inp, 'neon3d', ext)
+        fallback = _results_path(_out_default(inp, f"{opts['palette']}3d", ext))
         out = _unique_or_default(opts.get('output'), fallback)
         relief = opts.get('relief') or os.path.splitext(inp)[1].lower() not in MESH_EXTS
         if relief:
             path = neonize_relief_file(inp, out, opts['palette'], opts['glow'],
                                        opts.get('depth', 0.85), opts.get('turntable', 48),
                                        opts.get('azimuth', 30.0), opts.get('elevation', 20.0),
-                                       tracker=tracker)
+                                       tracker=tracker, export_mesh=opts.get('export_mesh', False))
         else:
             path = neonize_mesh_file(inp, out, opts['palette'], opts['glow'],
                                      opts.get('turntable', 0), opts.get('azimuth', 30.0),
@@ -1738,6 +1815,8 @@ def build_parser():
     p.add_argument('--azimuth', type=float, default=30.0)
     p.add_argument('--elevation', type=float, default=20.0)
     p.add_argument('--depth', type=float, default=0.85, help="relief depth (image\u2192mesh)")
+    p.add_argument('--export-mesh', action='store_true',
+                   help="relief runs also export the remeshed geometry as .obj")
     p.add_argument('--hwaccel', action='store_true',
                    help="let ffmpeg use hardware accel if present (decode only; optional)")
     p.add_argument('--json-progress', action='store_true',
@@ -1745,7 +1824,31 @@ def build_parser():
     return p
 
 
+def _attach_parent_console():
+    """windowed exe: re-attach to the cmd that launched `neonify.exe cli`
+    double-click (no parent console) skips silently, GUI stays clean"""
+    if os.name != 'nt' or not getattr(sys, 'frozen', False):
+        return
+    if len(sys.argv) < 2 or sys.argv[1] in ('gui', '--help', '-h'):
+        return
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        if k32.GetConsoleWindow():
+            return
+        if not k32.AttachConsole(-1):
+            return
+        sys.stdout = open('CONOUT$', 'w', buffering=1, encoding='utf-8', errors='replace')
+        sys.stderr = open('CONOUT$', 'w', buffering=1, encoding='utf-8', errors='replace')
+        sys.stdin = open('CONIN$', 'r', encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
+
 def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    _attach_parent_console()
     args = build_parser().parse_args(argv)
     if args.command == 'profiles':
         print_banner()
@@ -1777,7 +1880,8 @@ def main(argv=None):
             'env': args.env, 'output': args.output, 'spatial': not args.no_spatial,
             'neon_audio': args.neon_audio, 'audio_profile': args.profile,
             'advanced_audio': advanced, 'turntable': args.turntable,
-            'azimuth': args.azimuth, 'elevation': args.elevation, 'depth': args.depth}
+            'azimuth': args.azimuth, 'elevation': args.elevation, 'depth': args.depth,
+            'export_mesh': args.export_mesh}
     if args.command == 'batch':
         files = collect_inputs(args.input, IMG_EXTS | VID_EXTS | AUD_EXTS)
     elif args.command == 'image':
