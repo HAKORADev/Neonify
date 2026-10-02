@@ -48,7 +48,15 @@ jobs:
           "%JOM%" -j4 || exit /b 1
           "%JOM%" -j4 install || exit /b 1
 
+      - name: cache static opencv
+        id: ocvcache
+        uses: actions/cache@v4
+        with:
+          path: D:\src\ocvbuild
+          key: opencv-4.10.0-static-msvc-v1
+
       - name: build static opencv (core imgproc imgcodecs)
+        if: steps.ocvcache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           git clone --depth 1 --branch 4.10.0 https://github.com/opencv/opencv D:\src\opencv
@@ -134,7 +142,7 @@ jobs:
           mkdir -p /opt/src/build && cd /opt/src/build
           ../qtbase/configure -static -release -opensource -confirm-license \
             -prefix /opt/qts -nomake examples -nomake tests -nomake tools \
-            -qt-xcb -opengl desktop -no-openssl -no-dbus
+            -xcb -opengl desktop -no-openssl -no-dbus
           make -j"$(nproc)"
           make install
           cd /opt/src/qtmultimedia
@@ -142,7 +150,15 @@ jobs:
           make -j"$(nproc)"
           make install
 
+      - name: cache static opencv
+        id: ocvcache
+        uses: actions/cache@v4
+        with:
+          path: /opt/src/ocvbuild
+          key: opencv-4.10.0-static-linux-v1
+
       - name: build static opencv
+        if: steps.ocvcache.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 --branch 4.10.0 https://github.com/opencv/opencv /opt/src/opencv
           cmake -S /opt/src/opencv -B /opt/src/ocvbuild -G Ninja \
