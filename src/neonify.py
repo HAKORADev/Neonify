@@ -836,7 +836,7 @@ def _slash_sweep(l, r, sr, gain):
         center = f_top * (f_bot / f_top) ** u[:, 0]
         env = np.exp(-0.5 * ((logf[None, :] - np.log2(center)[:, None]) / 0.55) ** 2)
         fade = np.sin(np.pi * np.clip((t_norm - start) / dur, 0.0, 1.0))[:, 0]
-        mask += (env * fade * active[:, 0]).astype(np.float32)
+        mask += (env * fade[:, None] * active).astype(np.float32)
     S_l = S_l * (1.0 + 2.2 * mask)
     S_r = S_r * (1.0 + 2.2 * mask)
     yl = _istft_complex(S_l, n_fft, hop, n)
