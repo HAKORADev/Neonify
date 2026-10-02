@@ -38,8 +38,6 @@ def main():
     else:
         targets = [
             (os.path.join(qtbase, 'src', 'plugins', 'platforms', 'xcb'), 'qxcb'),
-            (os.path.join(qtbase, 'src', 'plugins', 'platforms', 'offscreen'), 'qoffscreen'),
-            (os.path.join(qtbase, 'src', 'plugins', 'platforms', 'minimal'), 'qminimal'),
         ]
     pairs = []
     for folder, need in targets:
