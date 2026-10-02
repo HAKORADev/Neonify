@@ -20,6 +20,7 @@ struct Options {
     float elevation = 20.0f;
     float depth = 0.85f;
     bool hwaccel = false;
+    bool export_mesh = false;
 };
 
 inline const char* PROFILE_DESCRIPTIONS(const std::string& p) {

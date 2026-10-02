@@ -1,574 +1,900 @@
-// NEONIFY native — qt widgets gui (qt 5.15, same qt imder uses)
+// NEONIFY native gui — qt 5.15 widgets. left inputs, right results, center
+// viewer/compare, bottom dynamic settings (0-100, app converts internally).
 #include "neon_common.h"
 #include "neon_image.h"
 #include "neon_audio.h"
 #include "neon_video.h"
 #include "neon_mesh.h"
 #include "neon_options.h"
+#include "neon_gui_widgets.h"
 
-#include <QtWidgets/QApplication>
-#include <QtWidgets/QMainWindow>
-#include <QtWidgets/QWidget>
-#include <QtWidgets/QVBoxLayout>
-#include <QtWidgets/QHBoxLayout>
-#include <QtWidgets/QLabel>
-#include <QtWidgets/QPushButton>
-#include <QtWidgets/QFileDialog>
-#include <QtWidgets/QMessageBox>
-#include <QtWidgets/QProgressBar>
-#include <QtWidgets/QFrame>
-#include <QtWidgets/QComboBox>
-#include <QtWidgets/QSlider>
-#include <QtWidgets/QCheckBox>
-#include <QtWidgets/QListWidget>
-#include <QtWidgets/QDoubleSpinBox>
-#include <QtWidgets/QDialog>
-#include <QtWidgets/QDialogButtonBox>
-#include <QtWidgets/QScrollArea>
-#include <QtCore/QThread>
-#include <QtCore/QFileInfo>
-#include <QtCore/QMimeData>
-#include <QtGui/QDragEnterEvent>
-#include <QtGui/QDropEvent>
-#include <QtGui/QImage>
-#include <QtCore/QMutex>
+#include <QtWidgets>
+#include <QMediaPlayer>
+#include <QMediaContent>
+#include <QVideoWidget>
+#include <QUrl>
+#include <QFileInfo>
+#include <QFileDialog>
+#include <QDragEnterEvent>
+#include <QMimeData>
+#include <atomic>
 
-#include <cstring>
-#include <memory>
+#ifdef NEONIFY_STATIC_QT
+#include <QtPlugin>
+#include "neon_plugins.h"
+#endif
 
 namespace neon_gui {
 
-using namespace neon;
+inline QString style_sheet() {
+    return QString(
+        "QPushButton{background:#1d1d23;color:#dddddd;border:1px solid #33333b;"
+        "border-radius:5px;padding:5px 12px;font-size:12px;}"
+        "QPushButton:hover{background:#282832;border-color:#ff22aa;}"
+        "QPushButton:disabled{color:#555559;border-color:#26262c;}"
+        "QPushButton#accent{background:#ff22aa;border:none;color:#ffffff;font-weight:bold;}"
+        "QPushButton#accent:hover{background:#ff4dbb;}"
+        "QComboBox{background:#1d1d23;color:#dddddd;border:1px solid #33333b;border-radius:5px;padding:4px 8px;}"
+        "QComboBox QAbstractItemView{background:#1d1d23;color:#dddddd;selection-background-color:#ff22aa;}"
+        "QSlider::groove:horizontal{height:4px;background:#33333b;border-radius:2px;}"
+        "QSlider::handle:horizontal{width:12px;margin:-5px 0;border-radius:6px;background:#ff22aa;}"
+        "QSlider::sub-page:horizontal{background:#8f2f6f;border-radius:2px;}"
+        "QCheckBox{color:#bbbbbb;font-size:12px;}"
+        "QSpinBox{background:#1d1d23;color:#dddddd;border:1px solid #33333b;border-radius:5px;padding:3px;}"
+        "QLabel{color:#bbbbbb;font-size:12px;background:transparent;}"
+        "QListWidget{background:#141418;border:1px solid #2a2a31;border-radius:6px;color:#cccccc;}"
+        "QListWidget::item{padding:2px;border-bottom:1px solid #202026;}"
+        "QScrollArea{border:none;background:transparent;}"
+        "QScrollArea>QWidget>QWidget{background:transparent;}"
+        "QProgressBar{background:#141418;border:1px solid #2a2a31;border-radius:5px;"
+        "color:#dddddd;text-align:center;height:16px;}"
+        "QProgressBar::chunk{background:#ff22aa;border-radius:4px;}"
+        "QMessageBox{background:#191920;}"
+        "QDialog{background:#191920;}"
+        "QDoubleSpinBox{background:#1d1d23;color:#dddddd;border:1px solid #33333b;border-radius:4px;padding:3px;}"
+    );
+}
 
-static const char* THEME_BG = "#0A0A0A";
-static const char* THEME_SURFACE = "#1a1a1a";
-static const char* THEME_TEXT = "#E5E5E5";
-static const char* THEME_TEXT_DIM = "#A0A0A0";
-static const char* THEME_BORDER = "#404040";
+inline QString panel_style() {
+    return QString("QFrame#panel{background:#141418;border:1px solid #2a2a31;border-radius:8px;}");
+}
 
-struct Job {
-    std::string command;
-    std::string input;
-    std::string output;
-    Options opts;
+enum Kind { KImage, KVideo, KAudio, KMesh, KRelief, KUnknown };
+
+inline Kind detect_kind(const QString& path) {
+    QString e = QFileInfo(path).suffix().toLower();
+    if (e == "png" || e == "jpg" || e == "jpeg" || e == "bmp" || e == "webp" || e == "tif" || e == "tiff")
+        return KImage;
+    if (e == "mp4" || e == "avi" || e == "mkv" || e == "mov" || e == "webm" || e == "gif")
+        return KVideo;
+    if (e == "wav" || e == "mp3" || e == "flac" || e == "ogg" || e == "m4a" || e == "aac" || e == "wma")
+        return KAudio;
+    if (e == "obj" || e == "ply" || e == "stl")
+        return KMesh;
+    return KUnknown;
+}
+
+inline QString kind_name(Kind k) {
+    switch (k) {
+        case KImage: return QStringLiteral("image");
+        case KVideo: return QStringLiteral("video");
+        case KAudio: return QStringLiteral("audio");
+        case KMesh: return QStringLiteral("3d mesh");
+        case KRelief: return QStringLiteral("relief");
+        default: return QStringLiteral("file");
+    }
+}
+
+inline QString kind_color(Kind k) {
+    switch (k) {
+        case KImage: return QStringLiteral("#39c2ff");
+        case KVideo: return QStringLiteral("#ffd239");
+        case KAudio: return QStringLiteral("#39ffa8");
+        case KMesh: case KRelief: return QStringLiteral("#c9a1ff");
+        default: return QStringLiteral("#888888");
+    }
+}
+
+// ---- input row: name + kind badge + Preview + Delete -----------------------
+class InputRow : public QWidget {
+public:
+    QString path;
+    Kind kind;
+    QPushButton* prev_btn = nullptr;
+    QPushButton* del_btn = nullptr;
+
+    InputRow(const QString& p, Kind k, QWidget* parent = nullptr)
+        : QWidget(parent), path(p), kind(k) {
+        QHBoxLayout* l = new QHBoxLayout(this);
+        l->setContentsMargins(6, 2, 4, 2);
+        l->setSpacing(4);
+        QLabel* name_lbl = new QLabel(QFileInfo(p).fileName(), this);
+        name_lbl->setStyleSheet("color:#cccccc;font-size:12px;background:transparent;");
+        name_lbl->setToolTip(p);
+        QLabel* badge = new QLabel(kind_name(k), this);
+        badge->setStyleSheet(QString("color:%1;font-size:10px;background:transparent;").arg(kind_color(k)));
+        prev_btn = new QPushButton("Preview", this);
+        del_btn = new QPushButton("Delete", this);
+        for (QPushButton* b : {prev_btn, del_btn}) {
+            b->setStyleSheet("QPushButton{background:#22222a;color:#aaaaaa;border:1px solid #33333b;"
+                             "border-radius:4px;padding:2px 8px;font-size:11px;}"
+                             "QPushButton:hover{color:#ffffff;border-color:#ff22aa;}");
+        }
+        l->addWidget(name_lbl, 1);
+        l->addWidget(badge);
+        l->addWidget(prev_btn);
+        l->addWidget(del_btn);
+    }
 };
 
-class Worker : public QThread {
-    Q_OBJECT
+// ---- result row: name + kind badge + Preview + Compare ---------------------
+class ResultRow : public QWidget {
 public:
-    std::vector<Job> jobs;
+    QString input_path;
+    QString output_path;
+    Kind kind;
+    QPushButton* prev_btn = nullptr;
+    QPushButton* cmp_btn = nullptr;
+
+    ResultRow(const QString& in, const QString& out, Kind k, QWidget* parent = nullptr)
+        : QWidget(parent), input_path(in), output_path(out), kind(k) {
+        QHBoxLayout* l = new QHBoxLayout(this);
+        l->setContentsMargins(6, 2, 4, 2);
+        l->setSpacing(4);
+        QLabel* name_lbl = new QLabel(QFileInfo(out).fileName(), this);
+        name_lbl->setStyleSheet("color:#cccccc;font-size:12px;background:transparent;");
+        name_lbl->setToolTip(out);
+        QLabel* badge = new QLabel(kind_name(k), this);
+        badge->setStyleSheet(QString("color:%1;font-size:10px;background:transparent;").arg(kind_color(k)));
+        prev_btn = new QPushButton("Preview", this);
+        cmp_btn = new QPushButton("Compare", this);
+        for (QPushButton* b : {prev_btn, cmp_btn}) {
+            b->setStyleSheet("QPushButton{background:#22222a;color:#aaaaaa;border:1px solid #33333b;"
+                             "border-radius:4px;padding:2px 8px;font-size:11px;}"
+                             "QPushButton:hover{color:#ffffff;border-color:#ff22aa;}");
+        }
+        l->addWidget(name_lbl, 1);
+        l->addWidget(badge);
+        l->addWidget(prev_btn);
+        l->addWidget(cmp_btn);
+    }
+};
+
+// ---- processing worker: sequential engine runs on a thread -----------------
+class ProcessingWorker : public QThread {
+    Q_OBJECT
+
+public:
+    QStringList inputs;
+    neon::Options opts;
+    std::atomic<bool> stop_flag{false};
+
+    ProcessingWorker(QObject* parent = nullptr) : QThread(parent) {}
+
+    static QString make_output(const QString& inp, Kind k, const neon::Options& o) {
+        std::string inps = inp.toStdString();
+        std::string tag;
+        std::string ext = "";
+        std::string::size_type dot = inps.find_last_of('.');
+        if (dot != std::string::npos) ext = inps.substr(dot);
+        if (k == KImage) { tag = o.palette; }
+        else if (k == KVideo) { tag = o.palette; ext = ".mp4"; }
+        else if (k == KAudio) { tag = o.profile.empty() ? std::string("neon") : o.profile; ext = ".wav"; }
+        else if (k == KMesh || k == KRelief) { tag = o.palette + "3d"; ext = o.turntable > 0 ? ".mp4" : ".png"; }
+        return QString::fromStdString(neon::results_path(neon::out_default(inps, tag, ext)));
+    }
+
     void run() override {
-        for (const auto& j : jobs) {
-            if (cancelled) break;
-            StageTracker tr(true, false);
+        for (const QString& q : inputs) {
+            if (stop_flag) break;
+            Kind k = detect_kind(q);
+            if (k == KUnknown) continue;
+            std::string inp = q.toStdString();
+            std::string out = make_output(q, k, opts).toStdString();
+            neon::StageTracker tr(true, false);
             tr.quiet = true;
             tr.hook = [this](const std::string& label, double frac) {
-                emit progress(int(frac * 100.0), QString::fromStdString(label));
+                emit progress_signal(QString::fromStdString(label), frac);
             };
             try {
-                if (j.command == "image") {
-                    tr.set_stages({"neonize", "save"});
-                    tr.begin_stage(0, "neonize");
-                    tr.step(0.5);
-                    cv::Mat img = cv::imread(j.input, cv::IMREAD_COLOR);
-                    if (img.empty()) throw std::runtime_error("cannot read image: " + j.input);
-                    cv::Mat out;
-                    EdgeAux aux;
-                    process_image_neon(img, j.opts.palette, j.opts.glow, j.opts.threshold,
-                                       j.opts.env, out, aux);
-                    tr.step(1.0);
-                    tr.complete_stage(0);
-                    tr.begin_stage(1, "save");
-                    tr.step(0.9);
-                    std::string finalp = unique_output_path(j.output);
-                    cv::imwrite(finalp, out, {cv::IMWRITE_PNG_COMPRESSION, 6});
-                    tr.complete_stage(1);
-                    tr.finish();
-                    emit file_done(QString::fromStdString(j.input), QString::fromStdString(finalp));
-                } else if (j.command == "video") {
-                    auto r = process_video_file(j.input, j.output, j.opts.palette, j.opts.glow,
-                                                j.opts.threshold, j.opts.env, j.opts.profile,
-                                                j.opts.spatial, j.opts.neon_audio, j.opts.advanced,
-                                                &tr);
-                    emit file_done(QString::fromStdString(j.input), QString::fromStdString(r.first));
-                } else if (j.command == "audio") {
-                    std::string path = neonize_audio_file(j.input, j.output,
-                                                          j.opts.profile.empty() ? "slash" : j.opts.profile,
-                                                          j.opts.glow, j.opts.advanced, &tr);
-                    emit file_done(QString::fromStdString(j.input), QString::fromStdString(path));
-                } else {
-                    bool relief = true;
-                    std::string e = lower_ext(j.input);
-                    if (e == ".obj" || e == ".ply" || e == ".stl") relief = false;
-                    std::string path;
-                    if (relief)
-                        path = neonize_relief_file(j.input, j.output, j.opts.palette, j.opts.glow,
-                                                   j.opts.depth, j.opts.turntable > 0 ? j.opts.turntable : 48,
-                                                   j.opts.azimuth, j.opts.elevation, &tr);
-                    else
-                        path = neonize_mesh_file(j.input, j.output, j.opts.palette, j.opts.glow,
-                                                 j.opts.turntable, j.opts.azimuth, j.opts.elevation, &tr);
-                    emit file_done(QString::fromStdString(j.input), QString::fromStdString(path));
+                if (k == KImage) {
+                    neon::neonize_image_file(inp, out, opts.palette, opts.glow,
+                                             opts.threshold, opts.env, &tr);
+                } else if (k == KVideo) {
+                    neon::process_video_file(inp, out, opts.palette, opts.glow, opts.threshold,
+                                             opts.env, opts.profile, opts.spatial,
+                                             opts.neon_audio, opts.advanced, &tr);
+                } else if (k == KAudio) {
+                    std::string prof = opts.profile.empty() ? "slash" : opts.profile;
+                    neon::neonize_audio_file(inp, out, prof, opts.glow, opts.advanced, &tr);
+                } else if (k == KMesh) {
+                    neon::neonize_mesh_file(inp, out, opts.palette, opts.glow,
+                                            opts.turntable, opts.azimuth, opts.elevation, &tr);
+                } else if (k == KRelief) {
+                    neon::neonize_relief_file(inp, out, opts.palette, opts.glow, opts.depth,
+                                              opts.turntable > 0 ? opts.turntable : 48,
+                                              opts.azimuth, opts.elevation, &tr, opts.export_mesh);
                 }
-                emit progress(100, "Complete");
+                tr.finish();
+                emit file_done(q, QString::fromStdString(out), int(k));
             } catch (const std::exception& e) {
-                emit failed(QString::fromStdString(e.what()));
-                return;
+                QString msg = QString::fromLocal8Bit(e.what());
+                if (msg.trimmed().isEmpty())
+                    msg = QStringLiteral("processing failed for %1").arg(QFileInfo(q).fileName());
+                emit failed(msg);
+            } catch (...) {
+                emit failed(QStringLiteral("processing failed for %1").arg(QFileInfo(q).fileName()));
             }
         }
         emit all_done();
     }
-    void cancel() { cancelled = true; }
-    bool cancelled = false;
 
 signals:
-    void progress(int percent, QString step);
-    void file_done(QString input, QString output);
+    void progress_signal(const QString& label, double frac);
+    void file_done(const QString& in, const QString& out, int kind);
+    void failed(const QString& msg);
     void all_done();
-    void failed(QString message);
 };
 
-#include "neon_gui.moc"
+// ---- 3d preview worker: 10s 360 turntable at preview quality ----------------
+class Preview3DWorker : public QThread {
+    Q_OBJECT
 
+public:
+    QString input;
+
+    Preview3DWorker(const QString& inp, QObject* parent = nullptr)
+        : QThread(parent), input(inp) {}
+
+    void run() override {
+        try {
+            std::string inp = input.toStdString();
+            neon::Mesh mesh;
+            Kind k = detect_kind(input);
+            if (k == KMesh) {
+                mesh = neon::load_mesh(inp);
+            } else {
+                cv::Mat img = cv::imread(inp, cv::IMREAD_COLOR);
+                if (img.empty()) throw std::runtime_error("cannot read image: " + inp);
+                neon::image_relief_mesh(img, 110, 0.85f, mesh);
+            }
+            neon::normalize_mesh(mesh);
+            std::string base = QFileInfo(input).fileName().toStdString();
+            std::string::size_type dot = base.find_last_of('.');
+            if (dot != std::string::npos) base = base.substr(0, dot);
+            std::string tmpdir = neon::results_dir() + "/previews";
+#ifdef _WIN32
+            CreateDirectoryA(tmpdir.c_str(), nullptr);
+#else
+            mkdir(tmpdir.c_str(), 0755);
+#endif
+            std::string out = tmpdir + "/" + base + "_360_" +
+                              std::to_string(QDateTime::currentMSecsSinceEpoch()) + ".mp4";
+            if (!neon::render_turntable_pipe(out, mesh, 240, 30.f, 20.f, "electric", 1.f, 24, 640, 480, [](int) {}))
+                throw std::runtime_error("preview encode failed");
+            emit preview_done(QString::fromStdString(out));
+        } catch (const std::exception& e) {
+            QString msg = QString::fromLocal8Bit(e.what());
+            emit preview_failed(msg.isEmpty() ? QStringLiteral("3d preview failed") : msg);
+        } catch (...) {
+            emit preview_failed(QStringLiteral("3d preview failed"));
+        }
+    }
+
+signals:
+    void preview_done(const QString& mp4);
+    void preview_failed(const QString& msg);
+};
+
+// ---- advanced audio dialog (schema-driven, profile aware) -------------------
 class AdvancedAudioDialog : public QDialog {
 public:
-    AdvancedAudioDialog(const QString& profile, QWidget* parent) : QDialog(parent) {
-        setWindowTitle("Advanced audio settings");
-        setMinimumWidth(480);
-        setStyleSheet(QString("QDialog{background-color:#121212;} QLabel{color:%1;}").arg(THEME_TEXT));
-        combo = new QComboBox();
-        for (const char* p : AUDIO_PROFILES) {
-            QString s = QString("%1 — %2").arg(p, PROFILE_DESCRIPTIONS(p));
-            combo->addItem(s, QString(p));
-        }
-        int idx = combo->findData(profile);
-        if (idx >= 0) combo->setCurrentIndex(idx);
-        auto lay = new QVBoxLayout(this);
-        auto prow = new QHBoxLayout();
-        prow->addWidget(new QLabel("Profile"));
-        prow->addWidget(combo, 1);
-        lay->addLayout(prow);
-        hint = new QLabel("Overrides the profile's tuned defaults — leave untouched to keep the stock sound.");
-        hint->setWordWrap(true);
-        hint->setStyleSheet("color:#A0A0A0;font-size:11px;");
-        lay->addWidget(hint);
-        rows_widget = new QWidget();
-        rows = new QVBoxLayout(rows_widget);
-        rows->setContentsMargins(0, 0, 0, 0);
-        lay->addWidget(rows_widget);
-        auto buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-        connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
-        connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-        lay->addWidget(buttons);
-        connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) { rebuild(); });
-        rebuild();
-    }
+    std::map<std::string, float> overrides;
+    std::vector<QDoubleSpinBox*> spins;
 
-    Advanced result_advanced() const {
-        Advanced adv;
-        for (auto it = spins.constBegin(); it != spins.constEnd(); ++it)
-            adv.params[it.key().toStdString()] = float(it.value()->value());
-        return adv;
-    }
-
-    QString result_profile() const { return combo->currentData().toString(); }
-
-private:
-    void rebuild() {
-        spins.clear();
-        if (layout()) {
-            while (QLayoutItem* it = rows->takeAt(0)) {
-                if (auto* w = it->widget()) w->deleteLater();
-                delete it;
-            }
-        }
-        QString profile = combo->currentData().toString();
-        int count = int(sizeof(ADV_SCHEMA) / sizeof(ADV_SCHEMA[0]));
-        bool found = false;
+    AdvancedAudioDialog(const QString& prof, QWidget* parent = nullptr) : QDialog(parent) {
+        setWindowTitle("Advanced audio — " + prof);
+        setMinimumWidth(420);
+        QVBoxLayout* root = new QVBoxLayout(this);
+        QScrollArea* sc = new QScrollArea(this);
+        sc->setWidgetResizable(true);
+        QWidget* inner = new QWidget;
+        QVBoxLayout* form = new QVBoxLayout(inner);
+        std::vector<std::pair<std::string, std::string>> rows;
+        int count = int(sizeof(neon::ADV_SCHEMA) / sizeof(neon::ADV_SCHEMA[0]));
         for (int i = 0; i < count; i++) {
-            if (profile != ADV_SCHEMA[i][0]) continue;
-            found = true;
-            auto* row = new QHBoxLayout();
-            auto* lab = new QLabel(ADV_SCHEMA[i][2]);
-            auto* spin = new QDoubleSpinBox();
-            float lo = 0, hi = 1, dflt = 0;
-            if (schema_bounds(profile, ADV_SCHEMA[i][1], lo, hi, dflt)) {
-                spin->setRange(lo, hi);
-                spin->setSingleStep(std::max((hi - lo) / 100.0, 0.01));
-                spin->setValue(dflt);
-            }
-            row->addWidget(lab, 1);
-            row->addWidget(spin);
-            rows->addLayout(row);
-            spins[QString(ADV_SCHEMA[i][1])] = spin;
+            if (prof == neon::ADV_SCHEMA[i][0])
+                rows.push_back({neon::ADV_SCHEMA[i][1], neon::ADV_SCHEMA[i][2]});
         }
-        hint->setVisible(found);
-    }
-    struct Bound { const char* key; float lo, hi, dflt; };
-    static const std::map<std::string, std::vector<Bound>>& schema_table() {
-        static const std::map<std::string, std::vector<Bound>> t = {
-            {"fire", {{"drive", 0, 1, 0.52f}, {"flicker_rate", 1, 12, 5.5f}, {"flicker_depth", 0, 0.6f, 0.25f},
-                       {"crackle", 0, 1.5f, 0.5f}, {"rumble", 0, 1.5f, 0.6f}, {"rumble_hz", 40, 160, 90}}},
-            {"ice", {{"shimmer_mix", 0, 1, 0.4f}, {"breath_rate", 0.1f, 2, 0.5f}, {"breath_depth", 0, 10, 3.5f},
-                      {"time", 0.05f, 1, 0.19f}, {"fb", 0, 0.9f, 0.3f}, {"damp", 1000, 12000, 7000}, {"mix", 0, 1, 0.28f}}},
-            {"robotic", {{"ring_hz", 40, 220, 88}, {"ring_mix", 0, 1, 0.6f}, {"comb", 0, 1, 0.45f}, {"bits", 6, 16, 10}}},
-            {"ghost", {{"fog_mix", 0, 1, 0.5f}, {"whisper_rate", 0.1f, 2, 0.37f}, {"whisper_depth", 0, 12, 5},
-                        {"time", 0.05f, 1.5f, 0.42f}, {"fb", 0, 0.9f, 0.42f}, {"damp", 500, 8000, 2600}, {"mix", 0, 1, 0.3f}}},
-            {"void", {{"pitch_mix", 0, 1, 0.45f}, {"mix", 0, 1, 0.5f}, {"tone", 500, 6000, 1500},
-                       {"time", 0.05f, 1.5f, 0.55f}, {"fb", 0, 0.9f, 0.5f}, {"damp", 500, 8000, 1800}}},
-            {"echo", {{"time", 0.05f, 1.5f, 0.31f}, {"fb", 0, 0.9f, 0.45f}, {"damp", 500, 12000, 4200},
-                       {"mix", 0, 1, 0.35f}, {"lp", 1000, 16000, 9000}}},
-            {"slash", {{"gain", 0, 2, 0.55f}}},
-        };
-        return t;
-    }
-    static bool schema_bounds(const QString& profile, const QString& key, float& lo, float& hi, float& dflt) {
-        const auto& t = schema_table();
-        auto it = t.find(profile.toStdString());
-        if (it == t.end()) return false;
-        for (const auto& b : it->second) {
-            if (key == b.key) {
-                lo = b.lo;
-                hi = b.hi;
-                dflt = b.dflt;
-                return true;
+        if (rows.empty()) form->addWidget(new QLabel("this profile has no extra settings", this));
+        for (auto& row : rows) {
+            QHBoxLayout* l = new QHBoxLayout;
+            QLabel* lbl = new QLabel(QString::fromStdString(row.second), this);
+            QDoubleSpinBox* sp = new QDoubleSpinBox(this);
+            float dflt = neon::default_advanced_value(prof.toStdString(), row.first);
+            sp->setRange(0.0, 24000.0);
+            sp->setDecimals(3);
+            sp->setValue(dflt);
+            sp->setProperty("key", QString::fromStdString(row.first));
+            sp->setProperty("dflt", dflt);
+            spins.push_back(sp);
+            l->addWidget(lbl, 1);
+            l->addWidget(sp);
+            form->addLayout(l);
+        }
+        sc->setWidget(inner);
+        root->addWidget(sc);
+        QDialogButtonBox* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Reset, this);
+        root->addWidget(bb);
+        connect(bb, &QDialogButtonBox::accepted, this, [this] {
+            for (QDoubleSpinBox* sp : spins) {
+                float dflt = sp->property("dflt").toFloat();
+                if (sp->value() != dflt)
+                    overrides[sp->property("key").toString().toStdString()] = float(sp->value());
             }
+            accept();
+        });
+        connect(bb->button(QDialogButtonBox::Reset), &QPushButton::clicked, this, [this] {
+            for (QDoubleSpinBox* sp : spins) sp->setValue(sp->property("dflt").toFloat());
+        });
+    }
+};
+
+// ---- main window ------------------------------------------------------------
+class NeonifyGUI : public QMainWindow {
+public:
+    QListWidget* in_list = nullptr;
+    QListWidget* out_list = nullptr;
+    QStackedWidget* center = nullptr;
+    SingleViewer* viewer = nullptr;
+    SideBySideView* sbs = nullptr;
+    VideoCompare* vcmp = nullptr;
+    AudioCompare* acmp = nullptr;
+    QMediaPlayer* single_player = nullptr;
+
+    QComboBox* palette_combo = nullptr;
+    QSlider* glow = nullptr; QLabel* glow_v = nullptr;
+    QSlider* thr = nullptr; QLabel* thr_v = nullptr;
+    QSlider* env = nullptr; QLabel* env_v = nullptr;
+    QWidget* vis_section = nullptr;
+    QWidget* aud_section = nullptr;
+    QWidget* td_section = nullptr;
+    QComboBox* profile_combo = nullptr;
+    QCheckBox* neon_audio = nullptr;
+    QCheckBox* spatial = nullptr;
+    QPushButton* adv_btn = nullptr;
+    std::map<std::string, float> advanced;
+    QComboBox* turn_combo = nullptr;
+    QSlider* depth = nullptr; QLabel* depth_v = nullptr;
+    QSlider* azim = nullptr; QLabel* azim_v = nullptr;
+    QSlider* elev = nullptr; QLabel* elev_v = nullptr;
+    QCheckBox* export_mesh = nullptr;
+
+    QPushButton* run_btn = nullptr;
+    QProgressBar* bar = nullptr;
+    QLabel* status = nullptr;
+    ProcessingWorker* worker = nullptr;
+    Preview3DWorker* prev3d = nullptr;
+    int proc_done = 0;
+
+    NeonifyGUI() {
+        setWindowTitle("Neonify — dark&white neon media neonifier");
+        setWindowIcon(QIcon(":/logo.png"));
+        setAcceptDrops(true);
+        resize(1280, 800);
+        setMinimumSize(1040, 680);
+
+        setStyleSheet(style_sheet() +
+                      "QMainWindow{background:#0d0d10;} QWidget#root{background:#0d0d10;}");
+        QWidget* central = new QWidget(this);
+        central->setObjectName("root");
+        setCentralWidget(central);
+        QVBoxLayout* root = new QVBoxLayout(central);
+        root->setContentsMargins(10, 8, 10, 8);
+        root->setSpacing(8);
+
+        root->addWidget(build_header());
+
+        QHBoxLayout* body = new QHBoxLayout;
+        body->setSpacing(8);
+        body->addWidget(build_inputs_panel(), 0);
+        body->addWidget(build_center(), 1);
+        body->addWidget(build_results_panel(), 0);
+        root->addLayout(body, 1);
+
+        root->addWidget(build_settings());
+
+        QHBoxLayout* foot = new QHBoxLayout;
+        run_btn = new QPushButton("NEONIFY");
+        run_btn->setObjectName("accent");
+        run_btn->setEnabled(false);
+        run_btn->setMinimumHeight(34);
+        bar = new QProgressBar;
+        bar->setValue(0);
+        status = new QLabel("drop files, add with +, pick settings, hit NEONIFY");
+        status->setStyleSheet("color:#888888;font-size:11px;");
+        foot->addWidget(run_btn);
+        foot->addWidget(bar, 1);
+        foot->addWidget(status, 2);
+        root->addLayout(foot);
+
+        connect(run_btn, &QPushButton::clicked, this, &NeonifyGUI::start_processing);
+        refresh_sections();
+        refresh_run_enabled();
+    }
+
+    QWidget* build_header() {
+        QWidget* h = new QWidget(this);
+        QHBoxLayout* l = new QHBoxLayout(h);
+        l->setContentsMargins(0, 0, 0, 0);
+        QLabel* logo = new QLabel(h);
+        QPixmap pm(":/logo.png");
+        if (!pm.isNull())
+            logo->setPixmap(pm.scaled(34, 34, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        QLabel* title = new QLabel("NEONIFY", h);
+        title->setStyleSheet("color:#ffffff;font-size:19px;font-weight:bold;letter-spacing:3px;");
+        QLabel* tag = new QLabel("dark&white neon media neonifier", h);
+        tag->setStyleSheet("color:#666670;font-size:11px;");
+        l->addWidget(logo);
+        l->addWidget(title);
+        l->addWidget(tag);
+        l->addStretch();
+        return h;
+    }
+
+    QWidget* build_inputs_panel() {
+        QFrame* p = new QFrame(this);
+        p->setObjectName("panel");
+        p->setStyleSheet(panel_style());
+        p->setFixedWidth(330);
+        QVBoxLayout* l = new QVBoxLayout(p);
+        QLabel* t = new QLabel("INPUT FILES", p);
+        t->setStyleSheet("color:#ffffff;font-weight:bold;font-size:12px;");
+        l->addWidget(t);
+        in_list = new QListWidget(p);
+        l->addWidget(in_list, 1);
+        QHBoxLayout* btns = new QHBoxLayout;
+        QPushButton* add = new QPushButton("+ Add files", p);
+        QPushButton* clr = new QPushButton("Clear", p);
+        btns->addWidget(add);
+        btns->addWidget(clr);
+        l->addLayout(btns);
+        connect(add, &QPushButton::clicked, this, [this] { add_files_dialog(); });
+        connect(clr, &QPushButton::clicked, this, [this] {
+            in_list->clear();
+            refresh_sections();
+            refresh_run_enabled();
+            status->setText("queue cleared");
+        });
+        return p;
+    }
+
+    QWidget* build_results_panel() {
+        QFrame* p = new QFrame(this);
+        p->setObjectName("panel");
+        p->setStyleSheet(panel_style());
+        p->setFixedWidth(350);
+        QVBoxLayout* l = new QVBoxLayout(p);
+        QLabel* t = new QLabel("RESULTS", p);
+        t->setStyleSheet("color:#ffffff;font-weight:bold;font-size:12px;");
+        l->addWidget(t);
+        out_list = new QListWidget(p);
+        l->addWidget(out_list, 1);
+        QLabel* hint = new QLabel("Preview shows a result — Compare puts it next to its original", p);
+        hint->setWordWrap(true);
+        hint->setStyleSheet("color:#666670;font-size:10px;");
+        l->addWidget(hint);
+        return p;
+    }
+
+    QWidget* build_center() {
+        center = new QStackedWidget(this);
+        viewer = new SingleViewer;
+        sbs = new SideBySideView;
+        vcmp = new VideoCompare;
+        acmp = new AudioCompare;
+        center->addWidget(viewer);
+        center->addWidget(sbs);
+        center->addWidget(vcmp);
+        center->addWidget(acmp);
+        center->setCurrentIndex(0);
+        viewer->show_text("neonify\n\nleft: queue inputs — right: results\nsettings at the bottom, everything 0-100");
+        single_player = new QMediaPlayer(this);
+        single_player->setVideoOutput(viewer->video);
+        return center;
+    }
+
+    QSlider* mk_slider(int lo, int hi, int val) {
+        QSlider* s = new QSlider(Qt::Horizontal, this);
+        s->setRange(lo, hi);
+        s->setValue(val);
+        return s;
+    }
+
+    QWidget* build_settings() {
+        QScrollArea* sc = new QScrollArea(this);
+        sc->setWidgetResizable(true);
+        sc->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        sc->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        sc->setMaximumHeight(215);
+        QWidget* panel = new QWidget;
+        QVBoxLayout* root = new QVBoxLayout(panel);
+        root->setContentsMargins(4, 2, 4, 2);
+        root->setSpacing(6);
+
+        vis_section = new QWidget(panel);
+        QVBoxLayout* vl = new QVBoxLayout(vis_section);
+        vl->setContentsMargins(0, 0, 0, 0);
+        vl->setSpacing(4);
+        QHBoxLayout* r1 = new QHBoxLayout;
+        r1->addWidget(new QLabel("palette", vis_section));
+        palette_combo = new QComboBox(vis_section);
+        const char* palettes[] = {"electric", "crimson", "ice", "toxic", "violet", "golden", "ghost"};
+        for (const char* p : palettes) palette_combo->addItem(QString::fromLatin1(p));
+        r1->addWidget(palette_combo, 1);
+        r1->addWidget(new QLabel("glow", vis_section));
+        glow = mk_slider(10, 100, 50);
+        glow_v = new QLabel("50", vis_section);
+        r1->addWidget(glow, 2);
+        r1->addWidget(glow_v);
+        vl->addLayout(r1);
+        QHBoxLayout* r2 = new QHBoxLayout;
+        r2->addWidget(new QLabel("edge threshold", vis_section));
+        thr = mk_slider(2, 60, 22);
+        thr_v = new QLabel("22", vis_section);
+        r2->addWidget(thr, 2);
+        r2->addWidget(thr_v);
+        r2->addWidget(new QLabel("ambient detail", vis_section));
+        env = mk_slider(10, 100, 50);
+        env_v = new QLabel("50", vis_section);
+        r2->addWidget(env, 2);
+        r2->addWidget(env_v);
+        vl->addLayout(r2);
+        connect(glow, &QSlider::valueChanged, this, [this] {
+            glow_v->setText(QString::number(glow->value()));
+        });
+        connect(thr, &QSlider::valueChanged, this, [this] {
+            thr_v->setText(QString::number(thr->value()));
+        });
+        connect(env, &QSlider::valueChanged, this, [this] {
+            env_v->setText(QString::number(env->value()));
+        });
+        root->addWidget(vis_section);
+
+        aud_section = new QWidget(panel);
+        QHBoxLayout* al = new QHBoxLayout(aud_section);
+        al->setContentsMargins(0, 0, 0, 0);
+        al->setSpacing(8);
+        al->addWidget(new QLabel("audio profile", aud_section));
+        profile_combo = new QComboBox(aud_section);
+        int pc = int(sizeof(neon::AUDIO_PROFILES) / sizeof(neon::AUDIO_PROFILES[0]));
+        for (int i = 0; i < pc; i++)
+            profile_combo->addItem(QString("%1 — %2").arg(neon::AUDIO_PROFILES[i])
+                                       .arg(QString::fromLatin1(neon::PROFILE_DESCRIPTIONS(neon::AUDIO_PROFILES[i]))));
+        profile_combo->setCurrentIndex(pc - 1);
+        al->addWidget(profile_combo, 2);
+        neon_audio = new QCheckBox("neonify audio with video", aud_section);
+        spatial = new QCheckBox("spatial glow", aud_section);
+        spatial->setChecked(true);
+        adv_btn = new QPushButton("Advanced…", aud_section);
+        al->addWidget(neon_audio);
+        al->addWidget(spatial);
+        al->addWidget(adv_btn);
+        root->addWidget(aud_section);
+        connect(adv_btn, &QPushButton::clicked, this, [this] { open_advanced_audio(); });
+
+        td_section = new QWidget(panel);
+        QHBoxLayout* tl = new QHBoxLayout(td_section);
+        tl->setContentsMargins(0, 0, 0, 0);
+        tl->setSpacing(8);
+        tl->addWidget(new QLabel("3d orbit", td_section));
+        turn_combo = new QComboBox(td_section);
+        const struct { const char* name; int v; } opts3d[] = {
+            {"single frame", 0}, {"24 frames", 24}, {"48 frames", 48},
+            {"96 frames", 96}, {"full 360 (240)", 240}};
+        for (auto& o : opts3d) turn_combo->addItem(QString::fromLatin1(o.name), o.v);
+        turn_combo->setCurrentIndex(2);
+        tl->addWidget(turn_combo, 1);
+        tl->addWidget(new QLabel("relief depth", td_section));
+        depth = mk_slider(5, 100, 43);
+        depth_v = new QLabel("43", td_section);
+        tl->addWidget(depth, 1);
+        tl->addWidget(depth_v);
+        tl->addWidget(new QLabel("view az / el", td_section));
+        azim = mk_slider(0, 100, 8);
+        azim_v = new QLabel("8", td_section);
+        tl->addWidget(azim);
+        tl->addWidget(azim_v);
+        elev = mk_slider(0, 100, 22);
+        elev_v = new QLabel("22", td_section);
+        tl->addWidget(elev);
+        tl->addWidget(elev_v);
+        export_mesh = new QCheckBox("export .obj", td_section);
+        tl->addWidget(export_mesh);
+        root->addWidget(td_section);
+        connect(depth, &QSlider::valueChanged, this, [this] { depth_v->setText(QString::number(depth->value())); });
+        connect(azim, &QSlider::valueChanged, this, [this] { azim_v->setText(QString::number(azim->value())); });
+        connect(elev, &QSlider::valueChanged, this, [this] { elev_v->setText(QString::number(elev->value())); });
+
+        sc->setWidget(panel);
+        QFrame* wrap = new QFrame(this);
+        wrap->setObjectName("panel");
+        wrap->setStyleSheet(panel_style());
+        QVBoxLayout* wl = new QVBoxLayout(wrap);
+        wl->setContentsMargins(6, 4, 6, 4);
+        wl->addWidget(sc);
+        return wrap;
+    }
+
+    void add_files_dialog() {
+        QStringList files = QFileDialog::getOpenFileNames(
+            this, "Add media files", QString(),
+            "Media (*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff *.mp4 *.avi *.mkv *.mov "
+            "*.webm *.gif *.wav *.mp3 *.flac *.ogg *.m4a *.aac *.wma *.obj *.ply *.stl);;All files (*.*)");
+        add_paths(files);
+    }
+
+    void add_paths(const QStringList& paths) {
+        QStringList skipped;
+        int added = 0;
+        for (const QString& p : paths) {
+            Kind k = detect_kind(p);
+            if (k == KUnknown) continue;
+            if (contains_input(p)) {
+                skipped << QFileInfo(p).fileName();
+                continue;
+            }
+            QListWidgetItem* it = new QListWidgetItem(in_list);
+            it->setSizeHint(QSize(0, 30));
+            InputRow* row = new InputRow(p, k, in_list);
+            in_list->setItemWidget(it, row);
+            QString qp = p;
+            connect(row->prev_btn, &QPushButton::clicked, this, [this, qp] { preview_single(qp); });
+            connect(row->del_btn, &QPushButton::clicked, this, [this, qp] { remove_input(qp); });
+            added++;
+        }
+        if (!skipped.isEmpty())
+            QMessageBox::information(this, "Duplicates skipped",
+                                     QStringLiteral("already in the queue, not added again:\n%1").arg(skipped.join("\n")));
+        if (added) {
+            refresh_sections();
+            refresh_run_enabled();
+            status->setText(QString("%1 file(s) added").arg(added));
+        }
+    }
+
+    bool contains_input(const QString& p) const {
+        QString want = QFileInfo(p).canonicalFilePath();
+        for (int i = 0; i < in_list->count(); i++) {
+            QWidget* w = in_list->itemWidget(in_list->item(i));
+            InputRow* r = dynamic_cast<InputRow*>(w);
+            if (r && QFileInfo(r->path).canonicalFilePath() == want)
+                return true;
         }
         return false;
     }
-    void spins_clear_placeholder() {}
-    QComboBox* combo;
-    QLabel* hint;
-    QWidget* rows_widget;
-    QVBoxLayout* rows;
-    QMap<QString, QDoubleSpinBox*> spins;
-};
 
-class MainWindow : public QMainWindow {
-public:
-    MainWindow() {
-        setWindowTitle("NEONIFY — Procedural Neon Art Tool (native)");
-        setStyleSheet(QString("QMainWindow{background-color:%1;}").arg(THEME_BG));
-        resize(1180, 720);
-        auto* central = new QWidget();
-        setCentralWidget(central);
-        auto* root = new QVBoxLayout(central);
-
-        auto* body = new QHBoxLayout();
-        auto* left = new QVBoxLayout();
-        auto* right = new QVBoxLayout();
-
-        auto* files_panel = new QFrame();
-        files_panel->setStyleSheet(
-            QString("QFrame{background-color:#121212;border:2px solid #E5E5E5;border-radius:8px;}"
-                    "QLabel{border:none;} QListWidget{background-color:%1;color:%2;"
-                    "border:1px solid %3;border-radius:4px;}").arg(THEME_SURFACE, THEME_TEXT, THEME_BORDER));
-        auto* files_lay = new QVBoxLayout(files_panel);
-        files_lay->addWidget(new QLabel("FILES — drop or add"));
-        list = new QListWidget();
-        list->setAcceptDrops(true);
-        list->setSelectionMode(QAbstractItemView::ExtendedSelection);
-        list->viewport()->setAcceptDrops(true);
-        list->viewport()->installEventFilter(this);
-        files_lay->addWidget(list, 1);
-        auto* add_row = new QHBoxLayout();
-        auto* add_btn = new QPushButton("Add files");
-        auto* clear_btn = new QPushButton("Clear");
-        add_btn->setStyleSheet(btn_style());
-        clear_btn->setStyleSheet(btn_style());
-        connect(add_btn, &QPushButton::clicked, this, [this] { add_files(); });
-        connect(clear_btn, &QPushButton::clicked, this, [this] { list->clear(); });
-        add_row->addWidget(add_btn);
-        add_row->addWidget(clear_btn);
-        files_lay->addLayout(add_row);
-        left->addWidget(files_panel, 3);
-
-        auto* settings_panel = new QFrame();
-        settings_panel->setStyleSheet(
-            QString("QFrame{background-color:#121212;border:2px solid #E5E5E5;border-radius:8px;}"
-                    "QLabel{border:none;color:%1;} QCheckBox{color:%1;}").arg(THEME_TEXT));
-        auto* settings = new QVBoxLayout(settings_panel);
-        settings->addWidget(new QLabel("SETTINGS"));
-
-        auto add_combo = [&](const QString& label, QComboBox** box) {
-            auto* row = new QHBoxLayout();
-            row->addWidget(new QLabel(label));
-            *box = new QComboBox();
-            (*box)->setStyleSheet(QString("QComboBox{background-color:%1;color:%2;border:1px solid %3;border-radius:4px;padding:4px;}").arg(THEME_SURFACE, THEME_TEXT, THEME_BORDER));
-            row->addWidget(*box, 1);
-            settings->addLayout(row);
-        };
-        add_combo("Mode", &mode_combo);
-        mode_combo->addItems({"Auto-detect", "Neon (images/videos)", "Audio", "Mesh / Relief"});
-        add_combo("Palette", &palette_combo);
-        for (const char* p : PALETTE_NAMES) palette_combo->addItem(QString(p).left(1).toUpper() + QString(p).mid(1), QString(p));
-        add_combo("Audio profile", &profile_combo);
-        for (const char* p : AUDIO_PROFILES) {
-            profile_combo->addItem(QString("%1 — %2").arg(p, PROFILE_DESCRIPTIONS(p)), QString(p));
-        }
-        auto add_slider = [&](const QString& label, QSlider** slider, QLabel** value, int lo, int hi, int val) {
-            auto* head = new QHBoxLayout();
-            head->addWidget(new QLabel(label));
-            head->addStretch();
-            *value = new QLabel(QString::number(val / 100.0, 'f', 2));
-            head->addWidget(*value);
-            auto* box = new QVBoxLayout();
-            *slider = new QSlider(Qt::Horizontal);
-            (*slider)->setRange(lo, hi);
-            (*slider)->setValue(val);
-            box->addLayout(head);
-            box->addWidget(*slider);
-            settings->addLayout(box);
-        };
-        add_slider("Glow", &glow_slider, &glow_value, 20, 240, 100);
-        connect(glow_slider, &QSlider::valueChanged, this, [this](int v) {
-            glow_value->setText(QString::number(v / 100.0, 'f', 2));
-        });
-        add_slider("Edge threshold", &thr_slider, &thr_value, 2, 50, 12);
-        connect(thr_slider, &QSlider::valueChanged, this, [this](int v) {
-            thr_value->setText(QString::number(v / 100.0, 'f', 2));
-        });
-
-        turntable_check = new QCheckBox("Mesh / image -> turntable orbit video");
-        spatial_check = new QCheckBox("Spatial glow (stereo pan)");
-        spatial_check->setChecked(true);
-        neon_audio_check = new QCheckBox("Neonify audio with video");
-        hwaccel_check = new QCheckBox("ffmpeg hwaccel decode (optional)");
-        for (auto* c : {turntable_check, spatial_check, neon_audio_check, hwaccel_check}) {
-            c->setStyleSheet(QString("QCheckBox{color:%1;}").arg(THEME_TEXT));
-            settings->addWidget(c);
-        }
-        auto* adv_btn = new QPushButton("Advanced audio settings…");
-        adv_btn->setStyleSheet(btn_style());
-        connect(adv_btn, &QPushButton::clicked, this, [this] {
-            AdvancedAudioDialog dlg(profile_combo->currentData().toString(), this);
-            if (dlg.exec() == QDialog::Accepted) {
-                advanced = dlg.result_advanced();
-                advanced_on = true;
+    void remove_input(const QString& p) {
+        for (int i = 0; i < in_list->count(); i++) {
+            QWidget* w = in_list->itemWidget(in_list->item(i));
+            InputRow* r = dynamic_cast<InputRow*>(w);
+            if (r && r->path == p) {
+                delete in_list->takeItem(i);
+                break;
             }
+        }
+        refresh_sections();
+        refresh_run_enabled();
+    }
+
+    QStringList input_paths() const {
+        QStringList out;
+        for (int i = 0; i < in_list->count(); i++) {
+            QWidget* w = in_list->itemWidget(in_list->item(i));
+            InputRow* r = dynamic_cast<InputRow*>(w);
+            if (r) out << r->path;
+        }
+        return out;
+    }
+
+    void refresh_sections() {
+        bool has_vis = false, has_aud = false, has_3d = false;
+        for (const QString& p : input_paths()) {
+            Kind k = detect_kind(p);
+            if (k == KImage || k == KVideo) has_vis = true;
+            if (k == KAudio) has_aud = true;
+            if (k == KMesh || k == KRelief) has_3d = true;
+        }
+        bool empty = in_list->count() == 0;
+        vis_section->setVisible(has_vis || empty);
+        aud_section->setVisible(has_aud || has_vis || empty);
+        td_section->setVisible(has_3d || empty);
+    }
+
+    void refresh_run_enabled() {
+        run_btn->setEnabled(in_list->count() > 0 && (!worker || !worker->isRunning()));
+    }
+
+    void preview_single(const QString& path) {
+        Kind k = detect_kind(path);
+        stop_center_media();
+        if (k == KImage) {
+            QPixmap pm(path);
+            if (pm.isNull()) {
+                QMessageBox::warning(this, "Neonify", "cannot open image:\n" + path);
+                return;
+            }
+            viewer->show_image(pm);
+            center->setCurrentIndex(0);
+            status->setText("preview: " + QFileInfo(path).fileName());
+        } else if (k == KVideo) {
+            center->setCurrentIndex(0);
+            single_player->setMedia(QMediaContent(QUrl::fromLocalFile(path)));
+            single_player->play();
+        } else if (k == KAudio) {
+            viewer->show_text("audio: " + QFileInfo(path).fileName() + "\nplaying…");
+            center->setCurrentIndex(0);
+            single_player->setMedia(QMediaContent(QUrl::fromLocalFile(path)));
+            single_player->play();
+        } else if (k == KMesh || k == KRelief) {
+            viewer->show_text("rendering 10s 360° orbit of " + QFileInfo(path).fileName() + "…");
+            center->setCurrentIndex(0);
+            if (prev3d && prev3d->isRunning()) return;
+            status->setText("rendering 3d orbit preview…");
+            prev3d = new Preview3DWorker(path, this);
+            connect(prev3d, &Preview3DWorker::preview_done, this, [this](const QString& mp4) {
+                status->setText("3d orbit ready — playing");
+                center->setCurrentIndex(0);
+                single_player->setMedia(QMediaContent(QUrl::fromLocalFile(mp4)));
+                single_player->play();
+            });
+            connect(prev3d, &Preview3DWorker::preview_failed, this, [this](const QString& msg) {
+                status->setText("3d preview failed");
+                QMessageBox::warning(this, "Neonify", "3d preview failed:\n" + msg);
+            });
+            prev3d->start();
+        }
+    }
+
+    void stop_center_media() {
+        single_player->stop();
+        vcmp->stop_all();
+        acmp->stop_all();
+    }
+
+    void add_result(const QString& in, const QString& out, Kind k) {
+        QListWidgetItem* it = new QListWidgetItem(out_list);
+        it->setSizeHint(QSize(0, 30));
+        ResultRow* row = new ResultRow(in, out, k, out_list);
+        out_list->setItemWidget(it, row);
+        connect(row->prev_btn, &QPushButton::clicked, this, [this, out] { preview_single(out); });
+        connect(row->cmp_btn, &QPushButton::clicked, this, [this, in, out, k] {
+            compare(in, out, k);
         });
-        settings->addWidget(adv_btn);
-
-        process_btn = new QPushButton("NEONIFY");
-        process_btn->setStyleSheet(
-            "QPushButton{background-color:#E5E5E5;color:#0A0A0A;border-radius:8px;"
-            "font-size:14px;font-weight:bold;padding:10px;}"
-            "QPushButton:disabled{background-color:#3a3a3a;color:#666;}");
-        connect(process_btn, &QPushButton::clicked, this, [this] { process(); });
-        settings->addWidget(process_btn);
-        bar = new QProgressBar();
-        bar->setStyleSheet(
-            QString("QProgressBar{background-color:%1;border:1px solid %3;border-radius:4px;"
-                    "text-align:center;color:%2;}"
-                    "QProgressBar::chunk{background-color:#E5E5E5;border-radius:3px;}")
-                .arg(THEME_SURFACE, THEME_TEXT, THEME_BORDER));
-        settings->addWidget(bar);
-        status = new QLabel("Ready — drop files to begin");
-        status->setWordWrap(true);
-        status->setStyleSheet("color:#A0A0A0;font-size:11px;");
-        settings->addWidget(status);
-        settings->addStretch();
-        left->addWidget(settings_panel, 2);
-
-        auto* preview_panel = new QFrame();
-        preview_panel->setStyleSheet(
-            QString("QFrame{background-color:#121212;border:2px solid #E5E5E5;border-radius:8px;}"
-                    "QLabel{border:none;}"));
-        auto* preview_lay = new QVBoxLayout(preview_panel);
-        preview_lay->addWidget(new QLabel("PREVIEW"));
-        preview = new QLabel("Results appear here after processing");
-        preview->setAlignment(Qt::AlignCenter);
-        preview->setStyleSheet("color:#A0A0A0;");
-        auto* scroll = new QScrollArea();
-        scroll->setWidgetResizable(true);
-        scroll->setWidget(preview);
-        preview_scroll = scroll;
-        preview_lay->addWidget(scroll, 1);
-        right->addWidget(preview_panel, 1);
-
-        body->addLayout(left, 1);
-        body->addLayout(right, 1);
-        root->addLayout(body, 1);
     }
 
-    QString detect_command(const QString& p) const {
-        QString e = QFileInfo(p).suffix().toLower();
-        if (e == "obj" || e == "ply" || e == "stl") return "mesh";
-        if (e == "wav" || e == "mp3" || e == "flac" || e == "ogg" || e == "m4a" || e == "aac" || e == "wma")
-            return "audio";
-        if (e == "mp4" || e == "avi" || e == "mov" || e == "mkv" || e == "webm" || e == "gif")
-            return "video";
-        if (e == "png" || e == "jpg" || e == "jpeg" || e == "bmp" || e == "webp" || e == "tif" || e == "tiff")
-            return "image";
-        return "";
-    }
-
-    QString default_output(const QString& p, const QString& command) const {
-        QFileInfo fi(p);
-        QString stamp = QString::fromStdString(timestamp_suffix());
-        if (command == "audio") return fi.absolutePath() + "/" + fi.completeBaseName() + "_neon" + stamp + ".wav";
-        if (command == "mesh")
-            return fi.absolutePath() + "/" + fi.completeBaseName() + "_neon3d" + stamp +
-                   (turntable_check->isChecked() ? ".mp4" : ".png");
-        return fi.absolutePath() + "/" + fi.completeBaseName() + "_neon" + stamp + fi.suffix();
-    }
-
-    void process() {
-        QStringList paths;
-        for (int i = 0; i < list->count(); i++) paths << list->item(i)->text();
-        if (paths.isEmpty()) {
-            QMessageBox::warning(this, "NEONIFY", "Add or drop at least one supported file first.");
+    void compare(const QString& in, const QString& out, Kind k) {
+        stop_center_media();
+        bool has_orig = QFile::exists(in);
+        QString ext = QFileInfo(out).suffix().toLower();
+        if (k == KAudio) {
+            acmp->load(in, out);
+            center->setCurrentWidget(acmp);
             return;
         }
-        worker = new Worker();
-        for (const auto& p : paths) {
-            QString command = detect_command(p);
-            if (command.isEmpty()) continue;
-            Job j;
-            j.command = command.toStdString();
-            j.input = p.toStdString();
-            j.output = default_output(p, command).toStdString();
-            j.opts.palette = palette_combo->currentData().toString().toStdString();
-            j.opts.glow = glow_slider->value() / 100.0f;
-            j.opts.threshold = thr_slider->value() / 100.0f;
-            j.opts.env = 1.0f;
-            j.opts.spatial = spatial_check->isChecked();
-            j.opts.neon_audio = neon_audio_check->isChecked();
-            j.opts.profile = profile_combo->currentData().toString().toStdString();
-            j.opts.advanced = advanced;
-            if (command == "mesh" && turntable_check->isChecked()) j.opts.turntable = 120;
-            worker->jobs.push_back(j);
-        }
-        if (worker->jobs.empty()) {
-            QMessageBox::warning(this, "NEONIFY", "No files matched the selected mode.");
-            delete worker;
-            worker = nullptr;
+        if (k == KVideo || ext == "mp4") {
+            if (!has_orig) {
+                preview_single(out);
+                status->setText("original gone — showing result only");
+                return;
+            }
+            vcmp->load(in, out);
+            center->setCurrentWidget(vcmp);
             return;
         }
-        process_btn->setEnabled(false);
+        QPixmap a, b;
+        if (has_orig) a.load(in);
+        b.load(out);
+        if (b.isNull()) {
+            QMessageBox::warning(this, "Neonify", "cannot open result:\n" + out);
+            return;
+        }
+        sbs->set_pair(a, has_orig ? QFileInfo(in).fileName() : QStringLiteral("original removed"),
+                      b, QFileInfo(out).fileName());
+        center->setCurrentWidget(sbs);
+        status->setText("compare: drag to pan, wheel to zoom — same view both sides");
+    }
+
+    void open_advanced_audio() {
+        QString prof = profile_combo->currentText().section(QStringLiteral(" —"), 0, 0);
+        AdvancedAudioDialog dlg(prof, this);
+        if (dlg.exec() == QDialog::Accepted) {
+            advanced = dlg.overrides;
+            status->setText(advanced.empty()
+                                ? QStringLiteral("advanced audio: defaults")
+                                : QStringLiteral("advanced audio: %1 override(s)").arg(int(advanced.size())));
+        }
+    }
+
+    void start_processing() {
+        QStringList files = input_paths();
+        if (files.isEmpty()) return;
+        if (worker && worker->isRunning()) return;
+
+        neon::Options o;
+        o.palette = palette_combo->currentText().toStdString();
+        o.glow = glow->value() / 50.0f;
+        o.threshold = 0.01f + thr->value() * 0.005f;
+        o.env = env->value() / 50.0f;
+        o.profile = profile_combo->currentText().section(QStringLiteral(" —"), 0, 0).toStdString();
+        o.spatial = spatial->isChecked();
+        o.neon_audio = neon_audio->isChecked();
+        o.advanced.params = advanced;
+        o.turntable = turn_combo->currentData().toInt();
+        o.azimuth = azim->value() * 3.6f;
+        o.elevation = elev->value() * 0.9f;
+        o.depth = depth->value() / 100.0f * 2.0f;
+        o.export_mesh = export_mesh->isChecked();
+
+        run_btn->setEnabled(false);
         bar->setValue(0);
-        status->setText(QString("Processing %1 file(s)...").arg(worker->jobs.size()));
-        connect(worker, &Worker::progress, this, [this](int percent, const QString& step) {
-            bar->setValue(percent);
-            status->setText(step);
+        proc_done = 0;
+
+        worker = new ProcessingWorker(this);
+        worker->inputs = files;
+        worker->opts = o;
+        connect(worker, &ProcessingWorker::progress_signal, this, [this](const QString& label, double frac) {
+            bar->setValue(int(frac * 100));
+            status->setText(label);
         });
-        connect(worker, &Worker::file_done, this, [this](const QString&, const QString& out) {
-            last_outputs.push_back(out);
+        connect(worker, &ProcessingWorker::file_done, this, [this](const QString& in, const QString& out, int kind) {
+            proc_done++;
+            add_result(in, out, Kind(kind));
+            status->setText(QStringLiteral("[%1] %2").arg(proc_done).arg(QFileInfo(out).fileName()));
         });
-        connect(worker, &Worker::all_done, this, [this] {
-            process_btn->setEnabled(true);
-            status->setText(QString("Done — %1 file(s) generated").arg(last_outputs.size()));
-            if (!last_outputs.isEmpty()) show_preview(last_outputs.last());
-            worker = nullptr;
+        connect(worker, &ProcessingWorker::failed, this, [this](const QString& msg) {
+            QMessageBox::warning(this, "Neonify", msg);
         });
-        connect(worker, &Worker::failed, this, [this](const QString& msg) {
-            process_btn->setEnabled(true);
-            bar->setValue(0);
-            status->setText("Processing failed — " + msg);
-            worker = nullptr;
+        connect(worker, &ProcessingWorker::all_done, this, [this] {
+            bar->setValue(100);
+            status->setText("done — outputs in results/");
+            run_btn->setEnabled(true);
         });
+        connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+        status->setText("neonifying…");
         worker->start();
     }
 
-    void show_preview(const QString& path) {
-        QFileInfo fi(path);
-        QString e = fi.suffix().toLower();
-        QPixmap pm(path);
-        if (!pm.isNull()) {
-            preview->setPixmap(pm.scaled(preview_scroll->viewport()->size(), Qt::KeepAspectRatio,
-                                         Qt::SmoothTransformation));
-            return;
-        }
-        if (e == "wav" || e == "mp3" || e == "flac") {
-            preview->setText("Audio written — " + fi.fileName());
-            return;
-        }
-        if (e == "mp4" || e == "mov" || e == "mkv" || e == "webm") {
-            std::string snap = (fi.absolutePath() + "/neon_preview_" + QString::fromStdString(timestamp_suffix().substr(1)) + ".png").toStdString();
-            bool ok = run_ok({"ffmpeg", "-y", "-loglevel", "error", "-ss", "0.5", "-i", path.toStdString(),
-                              "-frames:v", "1", snap});
-            if (ok) {
-                QPixmap sp(QString::fromStdString(snap));
-                if (!sp.isNull()) {
-                    preview->setPixmap(sp.scaled(preview_scroll->viewport()->size(), Qt::KeepAspectRatio,
-                                                 Qt::SmoothTransformation));
-                    return;
-                }
-            }
-        }
-        preview->setText("Output — " + fi.fileName());
+    void dragEnterEvent(QDragEnterEvent* e) override {
+        if (e->mimeData()->hasUrls()) e->acceptProposedAction();
     }
 
-    void add_files() {
-        QStringList files = QFileDialog::getOpenFileNames(this, "Select media files", QString(),
-                                                          "Media files (*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff "
-                                                          "*.mp4 *.avi *.mov *.mkv *.webm *.gif *.wav *.mp3 *.flac *.ogg *.m4a *.aac "
-                                                          "*.obj *.ply *.stl);;All files (*.*)");
-        for (const auto& f : files) list->addItem(f);
+    void dropEvent(QDropEvent* e) override {
+        QStringList files;
+        for (const QUrl& u : e->mimeData()->urls())
+            if (u.isLocalFile()) files << u.toLocalFile();
+        add_paths(files);
     }
-
-    bool eventFilter(QObject* obj, QEvent* ev) override {
-        if (obj == list->viewport() && ev->type() == QEvent::DragEnter) {
-            auto* de = static_cast<QDragEnterEvent*>(ev);
-            if (de->mimeData()->hasUrls()) de->acceptProposedAction();
-            return true;
-        }
-        if (obj == list->viewport() && ev->type() == QEvent::Drop) {
-            auto* de = static_cast<QDropEvent*>(ev);
-            for (const auto& url : de->mimeData()->urls()) {
-                QString p = url.toLocalFile();
-                if (!p.isEmpty()) list->addItem(p);
-            }
-            de->acceptProposedAction();
-            return true;
-        }
-        return QMainWindow::eventFilter(obj, ev);
-    }
-
-private:
-    static QString btn_style() {
-        return QString("QPushButton{background-color:%1;color:%2;border:1px solid #3a3a3a;"
-                       "border-radius:5px;padding:6px 12px;}"
-                       "QPushButton:hover{border:1px solid %2;}")
-            .arg(THEME_SURFACE, THEME_TEXT);
-    }
-    QListWidget* list;
-    QComboBox* mode_combo;
-    QComboBox* palette_combo;
-    QComboBox* profile_combo;
-    QSlider* glow_slider;
-    QSlider* thr_slider;
-    QLabel* glow_value;
-    QLabel* thr_value;
-    QCheckBox* turntable_check;
-    QCheckBox* spatial_check;
-    QCheckBox* neon_audio_check;
-    QCheckBox* hwaccel_check;
-    QPushButton* process_btn;
-    QProgressBar* bar;
-    QLabel* status;
-    QLabel* preview;
-    QScrollArea* preview_scroll = nullptr;
-    Worker* worker = nullptr;
-    QStringList last_outputs;
-    Advanced advanced;
-    bool advanced_on = false;
 };
 
 int run_gui(int argc, char** argv) {
-    QApplication app(argc, argv);
-    app.setStyle("Fusion");
-    QString here = QCoreApplication::applicationDirPath();
-    for (const QString& c : {here + "/logo.png", here + "/../assets/logo.png",
-                             here + "/../share/neonify/logo.png"}) {
-        if (QFileInfo::exists(c)) {
-            app.setWindowIcon(QIcon(c));
-            break;
-        }
+    std::vector<std::string> clean;
+    for (int i = 0; i < argc; i++) {
+        std::string a = argv[i] ? argv[i] : "";
+        if (a == "gui" || a == "cli") continue;
+        clean.push_back(a);
     }
-    MainWindow w;
+    std::vector<char*> cargv;
+    for (auto& s : clean) cargv.push_back(const_cast<char*>(s.c_str()));
+    int cargc = int(cargv.size());
+    QApplication app(cargc, cargv.data());
+    app.setApplicationName("Neonify");
+    app.setWindowIcon(QIcon(":/logo.png"));
+    NeonifyGUI w;
     w.show();
     return app.exec();
 }
 
 }  // namespace neon_gui
+
+#include "neon_gui.moc"

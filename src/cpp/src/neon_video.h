@@ -260,11 +260,7 @@ inline std::pair<std::string, int> process_video_file(
         tracker->complete_stage(int(stages.size()) - 1);
         tracker->finish();
     }
-#ifdef _WIN32
-    system((std::string("rmdir /s /q ") + tmp).c_str());
-#else
-    system(("rm -rf '" + tmp + "'").c_str());
-#endif
+    remove_tree(tmp);
     return {finalp, int(frame_no)};
 }
 

@@ -217,28 +217,64 @@ inline cv::Mat colorize(const cv::Mat& field, const std::string& palette, float 
 
 inline void process_image_neon(const cv::Mat& img_bgr, const std::string& palette,
                                float glow, float threshold, float env,
-                               cv::Mat& out, EdgeAux& aux) {
+                               cv::Mat& out, EdgeAux& aux, cv::Mat* field_out = nullptr) {
     cv::Mat edges;
     edge_field(img_bgr, glow, threshold, env, edges, aux);
     cv::Mat field;
     neon_glow_stack(img_bgr, edges, glow, env, threshold, field);
     out = colorize(field, palette);
+    if (field_out) *field_out = field;
 }
 
 inline std::string neonize_image_file(const std::string& inp, const std::string& out_path,
                                       const std::string& palette, float glow,
                                       float threshold, float env, StageTracker* tracker,
                                       EdgeAux* aux_out = nullptr) {
-    cv::Mat img = cv::imread(inp, cv::IMREAD_COLOR);
+    cv::Mat img = cv::imread(inp, cv::IMREAD_UNCHANGED);
+    if (img.empty()) img = cv::imread(inp, cv::IMREAD_COLOR);
     if (img.empty()) throw std::runtime_error("cannot read image: " + inp);
+    if (img.depth() != CV_8U) {
+        cv::Mat c8;
+        double mn, mx;
+        cv::minMaxIdx(img, &mn, &mx);
+        double scale = (mx > 255.0) ? 255.0 / mx : 1.0;
+        img.convertTo(c8, CV_8U, scale);
+        img = c8;
+    }
+    cv::Mat alpha8;
+    cv::Mat bgr;
+    if (img.channels() == 4) {
+        std::vector<cv::Mat> chs;
+        cv::split(img, chs);
+        alpha8 = chs[3].clone();
+        std::vector<cv::Mat> bgr3 = {chs[0], chs[1], chs[2]};
+        cv::merge(bgr3, bgr);
+    } else if (img.channels() == 1) {
+        cv::cvtColor(img, bgr, cv::COLOR_GRAY2BGR);
+    } else {
+        bgr = img;
+    }
     if (tracker) tracker->step(0.5f);
     EdgeAux aux;
-    cv::Mat out;
-    process_image_neon(img, palette, glow, threshold, env, out, aux);
+    cv::Mat out, field;
+    process_image_neon(bgr, palette, glow, threshold, env, out, aux, &field);
+    if (!alpha8.empty()) {
+        cv::Mat a32, f32;
+        alpha8.convertTo(a32, CV_32F, 1.0 / 255.0);
+        cv::min(cv::max(field * 1.25, 0.f), 1.f, f32);
+        cv::Mat a8;
+        cv::Mat aacc = a32.mul(f32) * 255.0 + 0.5;
+        aacc.convertTo(a8, CV_8U);
+        std::vector<cv::Mat> och, bch;
+        cv::split(out, bch);
+        och = {bch[0], bch[1], bch[2], a8};
+        cv::merge(och, out);
+    }
     if (tracker) tracker->step(0.9f);
     std::string finalp = unique_output_path(out_path);
     std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, 6};
-    cv::imwrite(finalp, out, params);
+    if (!cv::imwrite(finalp, out, params))
+        throw std::runtime_error("cannot write image: " + finalp);
     if (aux_out) *aux_out = aux;
     return finalp;
 }

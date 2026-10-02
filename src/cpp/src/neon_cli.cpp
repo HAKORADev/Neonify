@@ -157,7 +157,7 @@ inline void check_env() {
     std::printf("  ffmpeg      %s\n", which_ok("ffmpeg") ? "found"
                      : "not found (video/audio disabled — install ffmpeg)");
     unsigned cores = std::thread::hardware_concurrency();
-    std::printf("  cpu cores   %u  \u00b7  device: CPU (native — no gpu required)\n",
+    std::printf("  cpu cores   %u  \u00b7  device: CPU (native)\n",
                 cores ? cores : 1u);
     std::printf("\n");
 }
@@ -165,7 +165,7 @@ inline void check_env() {
 inline void flow_image(const std::vector<std::string>& inputs, const Options& o, StageTracker& tr) {
     for (const auto& inp : inputs) {
         std::printf("%s\u25b6%s %s\n", NEON_BLUE, NEON_RESET, base_name(inp).c_str());
-        std::string out = unique_or_default(o.output, out_default(inp, "neon", ext_of(inp)));
+        std::string out = unique_or_default(o.output, results_path(out_default(inp, o.palette, ext_of(inp))));
         EdgeAux aux;
         std::string path = neonize_image_file(inp, out, o.palette, o.glow, o.threshold, o.env, &tr, &aux);
         std::printf("%s  \u2192 %s   (noise %.1f, pre-blur %.2f)%s\n", NEON_DIM, path.c_str(),
@@ -176,7 +176,7 @@ inline void flow_image(const std::vector<std::string>& inputs, const Options& o,
 inline void flow_video(const std::vector<std::string>& inputs, const Options& o, StageTracker& tr) {
     for (const auto& inp : inputs) {
         std::printf("%s\u25b6%s %s\n", NEON_BLUE, NEON_RESET, base_name(inp).c_str());
-        std::string out = unique_or_default(o.output, out_default(inp, "neon", ".mp4"));
+        std::string out = unique_or_default(o.output, results_path(out_default(inp, o.palette, ".mp4")));
         auto r = process_video_file(inp, out, o.palette, o.glow, o.threshold, o.env,
                                     o.profile, o.spatial, o.neon_audio, o.advanced, &tr);
         std::printf("%s  \u2192 %s  (%d frames)%s\n", NEON_DIM, r.first.c_str(), r.second, NEON_RESET);
@@ -187,7 +187,7 @@ inline void flow_audio(const std::vector<std::string>& inputs, const Options& o,
     for (const auto& inp : inputs) {
         std::printf("%s\u25b6%s %s\n", NEON_BLUE, NEON_RESET, base_name(inp).c_str());
         std::string tag = o.profile.empty() ? "neon" : o.profile;
-        std::string out = unique_or_default(o.output, out_default(inp, tag, ".wav"));
+        std::string out = unique_or_default(o.output, results_path(out_default(inp, tag, ".wav")));
         std::string prof = o.profile.empty() ? "slash" : o.profile;
         std::string path = neonize_audio_file(inp, out, prof, o.glow, o.advanced, &tr);
         std::printf("%s  \u2192 %s%s\n", NEON_DIM, path.c_str(), NEON_RESET);
@@ -198,12 +198,14 @@ inline void flow_mesh(const std::vector<std::string>& inputs, const Options& o, 
     for (const auto& inp : inputs) {
         std::printf("%s\u25b6%s %s\n", NEON_BLUE, NEON_RESET, base_name(inp).c_str());
         std::string ext = o.turntable > 0 ? ".mp4" : ".png";
-        std::string out = unique_or_default(o.output, out_default(inp, "neon3d", ext));
+        std::string tag = std::string(o.palette) + "3d";
+        std::string out = unique_or_default(o.output, results_path(out_default(inp, tag, ext)));
         bool relief = !is_ext(inp, {".obj", ".ply", ".stl"});
         std::string path;
         if (relief)
             path = neonize_relief_file(inp, out, o.palette, o.glow, o.depth,
-                                       o.turntable > 0 ? o.turntable : 48, o.azimuth, o.elevation, &tr);
+                                       o.turntable > 0 ? o.turntable : 48, o.azimuth, o.elevation, &tr,
+                                       o.export_mesh);
         else
             path = neonize_mesh_file(inp, out, o.palette, o.glow, o.turntable, o.azimuth, o.elevation, &tr);
         std::printf("%s  \u2192 %s%s\n", NEON_DIM, path.c_str(), NEON_RESET);
@@ -350,9 +352,11 @@ inline void print_usage() {
     std::printf(
         "usage: neonify [command] [inputs...] [options]\n"
         "\n"
-        "commands:\n"
+        "modes:\n"
+        "  (no args)                              launch the qt gui\n"
+        "  cli                                    interactive cli mode\n"
         "  image | video | audio | mesh | batch   force a mode (auto-detected from inputs)\n"
-        "  gui                                    launch the qt gui (default when no args)\n"
+        "  gui                                    launch the qt gui\n"
         "  profiles                               list audio profiles\n"
         "\n"
         "options:\n"
@@ -360,7 +364,7 @@ inline void print_usage() {
         "  --glow <0..2>         glow intensity (default 1.0)\n"
         "  --threshold <0..1>    edge sensitivity (default 0.12)\n"
         "  --env <0..2>          scene brightness adaptation (default 1.0)\n"
-        "  -o, --output <path>   output path (default: <input>_neon_<timestamp>)\n"
+        "  -o, --output <path>   output path (default: results/<input>_<effect>_<timestamp>)\n"
         "  --profile <name>      audio profile: fire ice robotic ghost void echo slash\n"
         "  --neon-audio          neonify the audio too (video mode)\n"
         "  --no-spatial          disable stereo spatial glow (video mode)\n"
@@ -369,11 +373,11 @@ inline void print_usage() {
         "  --azimuth <deg>       3d view azimuth (default 30)\n"
         "  --elevation <deg>     3d view elevation (default 20)\n"
         "  --depth <0..2>        relief depth (default 0.85)\n"
-        "  --hwaccel             prefer gpu-accelerated ffmpeg decode when available\n"
+        "  --hwaccel             optional ffmpeg decode assist (auto-detected, may be ignored)\n"
         "  --json-progress       machine-readable progress lines\n"
         "  -h, --help            show this help\n"
         "\n"
-        "inputs can be files or folders; outputs get _YYMMDDHHMMSS suffixes, never overwrites.\n\n");
+        "inputs can be files or folders; outputs land in results/ with _YYMMDDHHMMSS suffixes.\n\n");
 }
 
 inline int run_cli(int argc, char** argv) {
@@ -389,7 +393,7 @@ inline int run_cli(int argc, char** argv) {
         auto next_float = [&](float dflt) { return (i + 1 < args.size()) ? std::atof(args[++i].c_str()) : dflt; };
         auto next_str = [&](const char* dflt) { return (i + 1 < args.size()) ? args[++i] : std::string(dflt); };
         auto next_int = [&](int dflt) { return (i + 1 < args.size()) ? std::atoi(args[++i].c_str()) : dflt; };
-        if (a == "gui" || a == "image" || a == "video" || a == "audio" || a == "mesh" ||
+        if (a == "gui" || a == "cli" || a == "image" || a == "video" || a == "audio" || a == "mesh" ||
             a == "batch" || a == "profiles")
             command = a;
         else if (a == "--palette") o.palette = next_str("electric");
@@ -405,6 +409,7 @@ inline int run_cli(int argc, char** argv) {
         else if (a == "--azimuth") o.azimuth = next_float(30.f);
         else if (a == "--elevation") o.elevation = next_float(20.f);
         else if (a == "--depth") o.depth = next_float(0.85f);
+        else if (a == "--export-mesh") o.export_mesh = true;
         else if (a == "--json-progress") json_progress = true;
         else if (a == "--advanced-audio") {
             std::string js = next_str("");
@@ -434,6 +439,10 @@ inline int run_cli(int argc, char** argv) {
     if (command == "profiles") {
         list_profiles();
         return 0;
+    }
+    if (command == "cli") {
+        print_banner();
+        return interactive_mode(which_ok("ffmpeg"));
     }
 #ifdef NEONIFY_WITH_GUI
     if ((command.empty() || command == "gui") && inputs.empty())
@@ -493,5 +502,6 @@ inline int run_cli(int argc, char** argv) {
 }  // namespace neon
 
 int main(int argc, char** argv) {
+    neon::attach_parent_console(argc, argv);
     return neon::run_cli(argc, argv);
 }

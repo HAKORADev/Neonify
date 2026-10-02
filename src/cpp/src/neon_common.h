@@ -22,6 +22,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <shellapi.h>
 #undef min
 #undef max
 #include <io.h>
@@ -96,7 +97,7 @@ inline void print_banner() {
     std::printf("%s%s%s\n", NEON_BLUE, NEON_BOLD, banner_rows[0].c_str());
     std::printf("%s%s%s%s  %s%s\n", NEON_BLUE, banner_rows[1].c_str(), NEON_RESET, NEON_DIM, APP_TAG, NEON_RESET);
     std::printf("%s%s%s\n", NEON_PINK, banner_rows[2].c_str(), NEON_RESET);
-    std::printf("%s%s%s%s  %s  \xe2\x80\xa2  cpu-native \xe2\x80\x94 no gpu needed%s\n",
+    std::printf("%s%s%s%s  %s  \xc2\xb7  cpu-native \xc2\xb7 no gpu needed%s\n",
                 NEON_PINK, banner_rows[3].c_str(), NEON_RESET, NEON_DIM, APP_VER, NEON_RESET);
     std::printf("%s%s%s\n\n", NEON_BLUE, banner_rows[4].c_str(), NEON_RESET);
 }
@@ -134,6 +135,52 @@ inline std::string out_default(const std::string& inp, const std::string& tag, c
 
 inline std::string unique_or_default(const std::string& explicit_path, const std::string& fallback) {
     return explicit_path.empty() ? fallback : unique_output_path(explicit_path);
+}
+
+inline std::string cwd() {
+    char buf[4096];
+#ifdef _WIN32
+    if (!GetCurrentDirectoryA(sizeof(buf), buf)) return ".";
+#else
+    if (!getcwd(buf, sizeof(buf))) return ".";
+#endif
+    return buf;
+}
+
+inline std::string results_dir() {
+    std::string d = cwd() + "/results";
+#ifdef _WIN32
+    CreateDirectoryA(d.c_str(), nullptr);
+#else
+    mkdir(d.c_str(), 0755);
+#endif
+    return d;
+}
+
+inline std::string results_path(const std::string& name) {
+    return results_dir() + "/" + name;
+}
+
+inline void remove_tree(const std::string& p) {
+#ifdef _WIN32
+    SHFILEOPSTRUCTA op{};
+    std::vector<char> from(p.begin(), p.end());
+    from.push_back('\0');
+    from.push_back('\0');
+    op.hwnd = nullptr;
+    op.wFunc = FO_DELETE;
+    op.pFrom = from.data();
+    op.fFlags = FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT;
+    SHFileOperationA(&op);
+#else
+    pid_t p2 = fork();
+    if (p2 == 0) {
+        execlp("rm", "rm", "-rf", p.c_str(), (char*)nullptr);
+        _exit(127);
+    }
+    int st = 0;
+    waitpid(p2, &st, 0);
+#endif
 }
 
 inline std::string lower_ext(const std::string& p) {
@@ -443,6 +490,22 @@ inline void write_wav_stereo(const std::string& path, const std::vector<float>& 
 inline bool file_exists(const std::string& p) {
     std::ifstream f(p);
     return f.good();
+}
+
+// windowed exe: re-attach to the cmd that launched `neonify.exe cli`
+// double-click (no parent console) skips silently, GUI stays clean
+inline void attach_parent_console(int argc, char** argv) {
+#ifdef _WIN32
+    if (argc < 2) return;
+    std::string a0 = argv[1];
+    if (a0 == "gui" || a0 == "--help" || a0 == "-h") return;
+    if (GetConsoleWindow() != nullptr) return;
+    if (!AttachConsole(ATTACH_PARENT_PROCESS)) return;
+    freopen("CONOUT$", "w", stdout);
+    freopen("CONOUT$", "w", stderr);
+    freopen("CONIN$", "r", stdin);
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+#endif
 }
 
 inline bool which_ok(const std::string& tool) {

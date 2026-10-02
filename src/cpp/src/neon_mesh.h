@@ -305,6 +305,23 @@ inline bool render_turntable_pipe(const std::string& out_path, const Mesh& mesh,
     return proc.exit_code == 0;
 }
 
+inline void save_mesh_obj(const std::string& path, const Mesh& mesh) {
+    std::ofstream f(path, std::ios::binary);
+    if (!f.good()) throw std::runtime_error("cannot write mesh: " + path);
+    f.setf(std::ios::fixed);
+    f.precision(6);
+    for (const auto& v : mesh.verts) {
+        char b[128];
+        std::snprintf(b, sizeof(b), "v %g %g %g\n", v[0], v[1], v[2]);
+        f << b;
+    }
+    for (const auto& fc : mesh.faces) {
+        char b[96];
+        std::snprintf(b, sizeof(b), "f %d %d %d\n", fc[0] + 1, fc[1] + 1, fc[2] + 1);
+        f << b;
+    }
+}
+
 inline std::string neonize_mesh_file(const std::string& inp, const std::string& out_path,
                                      const std::string& palette, float glow, int turntable,
                                      float azimuth, float elevation, StageTracker* tracker) {
@@ -340,7 +357,7 @@ inline std::string neonize_mesh_file(const std::string& inp, const std::string& 
 inline std::string neonize_relief_file(const std::string& inp, const std::string& out_path,
                                        const std::string& palette, float glow, float depth,
                                        int turntable, float azimuth, float elevation,
-                                       StageTracker* tracker) {
+                                       StageTracker* tracker, bool export_mesh = false) {
     cv::Mat img = cv::imread(inp, cv::IMREAD_COLOR);
     if (img.empty()) throw std::runtime_error("cannot read image: " + inp);
     Mesh mesh;
@@ -363,6 +380,8 @@ inline std::string neonize_relief_file(const std::string& inp, const std::string
                                        elevation * float(M_PI) / 180.f, palette, glow);
         cv::imwrite(finalp, out);
     }
+    if (export_mesh)
+        save_mesh_obj(unique_output_path(out_path.substr(0, out_path.find_last_of('.')) + "_mesh.obj"), mesh);
     if (tracker) {
         tracker->complete_stage(1);
         tracker->begin_stage(2, "write");
