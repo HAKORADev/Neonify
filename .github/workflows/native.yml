@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'release tag, e.g. v0.5.0'
+        description: 'release version without the v, e.g. 0.5.0 (tag becomes v0.5.0)'
         required: true
       publish:
         description: 'replace the release assets in-place'
@@ -290,7 +290,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${{ inputs.version }}"
+          TAG="v${{ inputs.version }}"
           for a in $(gh api repos/$GITHUB_REPOSITORY/releases --jq ".[] | select(.tag_name==\"$TAG\") | .assets[].name"); do
             id=$(gh api repos/$GITHUB_REPOSITORY/releases --jq ".[] | select(.tag_name==\"$TAG\") | .assets[] | select(.name==\"$a\") | .id")
             gh api -X DELETE repos/$GITHUB_REPOSITORY/releases/assets/$id
