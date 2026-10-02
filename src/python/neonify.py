@@ -1542,10 +1542,10 @@ def ask_audio_profile(default='slash'):
 
 # ================================================================== flows
 def _out_default(inp, tag, ext=None):
-    """default outputs carry the effect + _timestamp — collisions die, files self-describe"""
+    """name_neonify_effect_timestamp — collisions die, files self-describe"""
     root = os.path.splitext(os.path.basename(inp))[0]
     ext = ext or os.path.splitext(inp)[1].lower()
-    return f"{root}_{tag}{timestamp_suffix()}{ext}"
+    return f"{root}_neonify_{tag}{timestamp_suffix()}{ext}"
 
 
 def results_dir():
@@ -1596,9 +1596,9 @@ def flow_audio(inputs, opts, tracker):
     outs = []
     for inp in inputs:
         print(f"{NEON_BLUE}\u25b6{NEON_RESET} {os.path.basename(inp)}")
-        fallback = _results_path(_out_default(inp, opts.get('audio_profile', 'neon'), '.wav'))
+        fallback = _results_path(_out_default(inp, opts.get('audio_profile') or 'slash', '.wav'))
         out = _unique_or_default(opts.get('output'), fallback)
-        path = neonize_audio_file(inp, out, opts.get('audio_profile', 'slash'), opts['glow'],
+        path = neonize_audio_file(inp, out, opts.get('audio_profile') or 'slash', opts['glow'],
                                   opts.get('advanced_audio'), tracker)
         print(f"{NEON_DIM}  \u2192 {path}{NEON_RESET}")
         outs.append(path)

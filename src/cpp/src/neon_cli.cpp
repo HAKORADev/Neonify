@@ -186,7 +186,7 @@ inline void flow_video(const std::vector<std::string>& inputs, const Options& o,
 inline void flow_audio(const std::vector<std::string>& inputs, const Options& o, StageTracker& tr) {
     for (const auto& inp : inputs) {
         std::printf("%s\u25b6%s %s\n", NEON_BLUE, NEON_RESET, base_name(inp).c_str());
-        std::string tag = o.profile.empty() ? "neon" : o.profile;
+        std::string tag = o.profile.empty() ? "slash" : o.profile;
         std::string out = unique_or_default(o.output, results_path(out_default(inp, tag, ".wav")));
         std::string prof = o.profile.empty() ? "slash" : o.profile;
         std::string path = neonize_audio_file(inp, out, prof, o.glow, o.advanced, &tr);

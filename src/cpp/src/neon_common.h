@@ -130,7 +130,7 @@ inline std::string out_default(const std::string& inp, const std::string& tag, c
     std::string base = (slash == std::string::npos) ? inp : inp.substr(slash + 1);
     std::string::size_type dot = base.find_last_of('.');
     std::string root = (dot == std::string::npos) ? base : base.substr(0, dot);
-    return root + "_" + tag + timestamp_suffix() + ext;
+    return root + "_neonify_" + tag + timestamp_suffix() + ext;
 }
 
 inline std::string unique_or_default(const std::string& explicit_path, const std::string& fallback) {

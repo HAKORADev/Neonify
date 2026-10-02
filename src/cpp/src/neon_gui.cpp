@@ -179,7 +179,7 @@ public:
         if (dot != std::string::npos) ext = inps.substr(dot);
         if (k == KImage) { tag = o.palette; }
         else if (k == KVideo) { tag = o.palette; ext = ".mp4"; }
-        else if (k == KAudio) { tag = o.profile.empty() ? std::string("neon") : o.profile; ext = ".wav"; }
+        else if (k == KAudio) { tag = o.profile.empty() ? std::string("slash") : o.profile; ext = ".wav"; }
         else if (k == KMesh || k == KRelief) { tag = o.palette + "3d"; ext = o.turntable > 0 ? ".mp4" : ".png"; }
         return QString::fromStdString(neon::results_path(neon::out_default(inps, tag, ext)));
     }
