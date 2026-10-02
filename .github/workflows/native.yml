@@ -40,7 +40,7 @@ jobs:
           echo using jom at %JOM%
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           mkdir D:\src\build && cd /d D:\src\build
-          ..\qtbase\configure.bat -static -static-runtime -release -opensource -confirm-license -prefix D:\qts -nomake examples -nomake tests -platform win32-msvc -opengl desktop -no-openssl -no-dbus || exit /b 1
+          call ..\qtbase\configure.bat -static -static-runtime -release -opensource -confirm-license -prefix D:\qts -nomake examples -nomake tests -platform win32-msvc -opengl desktop -no-openssl -no-dbus || exit /b 1
           "%JOM%" -j4 || exit /b 1
           "%JOM%" -j4 install || exit /b 1
           cd /d D:\src\qtmultimedia
@@ -64,43 +64,9 @@ jobs:
       - name: generate static plugin imports
         shell: pwsh
         run: |
-          $py = @'
-          import re, os
-          def find_class(folder):
-              for root, _, files in os.walk(folder):
-                  for f in files:
-                      if not f.endswith(('.h', '.cpp')):
-                          continue
-                      p = os.path.join(root, f)
-                      src = open(p, encoding='utf-8', errors='ignore').read()
-                      i = src.find('Q_PLUGIN_METADATA')
-                      if i < 0:
-                          continue
-                      seg = src[max(0, i - 500):i]
-                      names = re.findall(r'class\s+([A-Za-z0-9_]+)', seg)
-                      if names:
-                          return names[-1], os.path.basename(root)
-              return None, None
-          pairs = []
-          for folder, need in [
-              (r'D:\src\qtbase\src\plugins\platforms\windows', 'platform'),
-              (r'D:\src\qtbase\src\plugins\audio\qtaudio_windows', 'audio'),
-              (r'D:\src\qtmultimedia\src\plugins\wmf', 'wmf'),
-              (r'D:\src\qtmultimedia\src\plugins\dsengine', 'ds')]:
-              cls, _ = find_class(folder)
-              print('found', need, '=', cls)
-              if cls:
-                  pairs.append((need, cls))
-          os.makedirs(r'D:\src\gen', exist_ok=True)
-          with open(r'D:\src\gen\neon_plugins.h', 'w') as f:
-              f.write('#pragma once\n#include <QtPlugin>\n')
-              for _, cls in pairs:
-                  f.write('Q_IMPORT_PLUGIN(%s)\n' % cls)
-          print(open(r'D:\src\gen\neon_plugins.h').read())
-          '@
-          $py | Out-File -Encoding utf8 D:\src\gen_plugins.py
-          python D:\src\gen_plugins.py
-          Copy-Item D:\src\gen\neon_plugins.h "$env:GITHUB_WORKSPACE\src\cpp\src\neon_plugins.h"
+          python scripts\gen_plugins.py D:\src\gen\neon_plugins.h D:\src\qtbase D:\src\qtmultimedia windows
+          New-Item -ItemType Directory -Force -Path src\cpp\src | Out-Null
+          Copy-Item D:\src\gen\neon_plugins.h src\cpp\src\neon_plugins.h
 
       - name: build neonify (single exe, /MT, WIN32)
         shell: pwsh
@@ -151,7 +117,7 @@ jobs:
             libx11-dev libxcb1-dev libx11-xcb-dev libxext-dev libxrender-dev libxi-dev \
             libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev \
             libfreetype6-dev libgl1-mesa-dev libglib2.0-dev ninja-build \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libunwind-dev
 
       - name: cache static qt
         id: qtcache
@@ -190,40 +156,7 @@ jobs:
 
       - name: generate static plugin imports
         run: |
-          python3 - <<'EOF'
-          import re, os
-          def find_class(folder):
-              for root, _, files in os.walk(folder):
-                  for f in files:
-                      if not f.endswith(('.h', '.cpp')):
-                          continue
-                      p = os.path.join(root, f)
-                      src = open(p, encoding='utf-8', errors='ignore').read()
-                      i = src.find('Q_PLUGIN_METADATA')
-                      if i < 0:
-                          continue
-                      seg = src[max(0, i - 500):i]
-                      names = re.findall(r'class\s+([A-Za-z0-9_]+)', seg)
-                      if names:
-                          return names[-1]
-              return None
-          pairs = []
-          for folder, need in [
-              ('/opt/src/qtbase/src/plugins/platforms/xcb', 'xcb'),
-              ('/opt/src/qtbase/src/plugins/platforms/minimal', 'minimal'),
-              ('/opt/src/qtbase/src/plugins/platforms/offscreen', 'offscreen'),
-              ('/opt/src/qtmultimedia/src/plugins/gstreamer', 'gst')]:
-              cls = find_class(folder)
-              print('found', need, '=', cls)
-              if cls:
-                  pairs.append((need, cls))
-          os.makedirs('/opt/src/gen', exist_ok=True)
-          with open('/opt/src/gen/neon_plugins.h', 'w') as f:
-              f.write('#pragma once\n#include <QtPlugin>\n')
-              for _, cls in pairs:
-                  f.write('Q_IMPORT_PLUGIN(%s)\n' % cls)
-          print(open('/opt/src/gen/neon_plugins.h').read())
-          EOF
+          python3 scripts/gen_plugins.py /opt/src/gen/neon_plugins.h /opt/src/qtbase /opt/src/qtmultimedia linux
           cp /opt/src/gen/neon_plugins.h src/cpp/src/neon_plugins.h
 
       - name: build neonify
