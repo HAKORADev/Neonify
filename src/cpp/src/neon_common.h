@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include <cmath>
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -23,10 +24,15 @@
 #include <windows.h>
 #undef min
 #undef max
+#include <io.h>
 #else
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#endif
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
 #endif
 
 namespace neon {
