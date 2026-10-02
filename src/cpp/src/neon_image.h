@@ -1,0 +1,246 @@
+// NEONIFY native — image engine: v1 tube law (sobel ridge + 4-scale glow stack)
+// ported 1:1 from the python reference engine. laws are laws.
+#pragma once
+
+#include "neon_common.h"
+#include <opencv2/imgproc.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <cmath>
+#include <random>
+
+namespace neon {
+
+inline const char* PALETTE_NAMES[] = {"electric", "crimson", "ice", "toxic", "violet", "golden", "ghost"};
+inline constexpr float GLOW_SIGMAS[4] = {2.0f, 6.0f, 16.0f, 38.0f};
+inline constexpr float GLOW_WEIGHTS[4] = {0.9f, 0.62f, 0.45f, 0.32f};
+
+inline cv::Mat gaussian_blur(const cv::Mat& img, float sigma) {
+    if (sigma <= 0.05f) return img;
+    int k = int(std::ceil(sigma * 3.0f)) * 2 + 1;
+    cv::Mat out;
+    cv::GaussianBlur(img, out, cv::Size(k, k), sigma, sigma, cv::BORDER_REPLICATE);
+    return out;
+}
+
+inline cv::Mat luminance(const cv::Mat& img) {
+    if (img.channels() == 1) return img;
+    cv::Mat f, out;
+    img.convertTo(f, CV_32F);
+    cv::transform(f, out, cv::Matx13f(0.114f, 0.587f, 0.299f));
+    return out;
+}
+
+inline cv::Mat smoothstep(float lo, float hi, const cv::Mat& x) {
+    float denom = std::max(1e-6f, hi - lo);
+    cv::Mat t = (x - lo) / denom;
+    cv::min(cv::max(t, 0.f), 1.f, t);
+    cv::Mat tt2 = t.mul(t);
+    cv::Mat out = 3 * tt2 - 2 * tt2.mul(t);
+    return out;
+}
+
+inline cv::Mat build_palette_lut(const std::string& name, int n = 256) {
+    cv::Mat lut(n, 1, CV_32FC3);
+    for (int i = 0; i < n; i++) {
+        float t = float(i) / float(n - 1);
+        float r, g, b;
+        if (name == "crimson") {
+            r = 0.15f + 0.85f * t;
+            g = 0.02f * std::pow(t, 2.2f);
+            b = 0.08f + 0.25f * std::pow(t, 3.0f) * (1 - t) * 2;
+        } else if (name == "ice") {
+            r = 0.45f * std::pow(t, 2.5f);
+            g = 0.55f + 0.45f * std::pow(t, 1.6f);
+            b = 0.65f + 0.35f * t;
+        } else if (name == "toxic") {
+            r = 0.45f * std::pow(t, 3.2f);
+            g = 0.25f + 0.75f * t;
+            b = 0.06f * std::pow(t, 1.4f);
+        } else if (name == "violet") {
+            r = 0.35f + 0.65f * std::pow(t, 1.3f);
+            g = 0.04f + 0.22f * std::pow(t, 2.8f);
+            b = 0.55f + 0.45f * t;
+        } else if (name == "golden") {
+            r = 0.55f + 0.45f * t;
+            g = 0.32f * std::pow(t, 0.7f) + 0.12f * std::pow(t, 2.0f);
+            b = 0.02f * std::pow(t, 2.4f);
+        } else if (name == "ghost") {
+            r = 0.62f + 0.38f * std::pow(t, 1.8f);
+            g = 0.68f + 0.32f * std::pow(t, 1.4f);
+            b = 0.78f + 0.22f * t;
+        } else {
+            r = 0.85f * std::pow(t, 3.4f);
+            g = 0.25f + 0.75f * std::pow(t, 1.25f);
+            b = 0.10f + 0.90f * std::pow(t, 0.55f);
+        }
+        lut.at<cv::Vec3f>(i) = cv::Vec3f(b, g, r);
+    }
+    cv::Mat out;
+    lut.convertTo(out, CV_8UC3, 255.0);
+    return out;
+}
+
+inline const cv::Mat& palette_lut(const std::string& name) {
+    static std::map<std::string, cv::Mat> cache;
+    auto it = cache.find(name);
+    if (it == cache.end()) it = cache.emplace(name, build_palette_lut(name)).first;
+    return it->second;
+}
+
+inline float noise_estimate(const cv::Mat& lum) {
+    cv::Mat lap;
+    cv::Laplacian(lum, lap, CV_32F, 3);
+    std::vector<float> v;
+    v.reserve((size_t)lap.total());
+    for (int y = 0; y < lap.rows; y++) {
+        const float* row = lap.ptr<float>(y);
+        for (int x = 0; x < lap.cols; x++) v.push_back(std::fabs(row[x]));
+    }
+    if (v.empty()) return 0.f;
+    size_t mid = v.size() / 2;
+    std::nth_element(v.begin(), v.begin() + mid, v.end());
+    return v[mid] / 0.6745f;
+}
+
+inline cv::Mat support_mask(const cv::Mat& lum, float radius) {
+    cv::Mat g = gaussian_blur(lum, radius);
+    cv::Mat gx, gy;
+    cv::Sobel(g, gx, CV_32F, 1, 0, 3);
+    cv::Sobel(g, gy, CV_32F, 0, 1, 3);
+    cv::Mat grad;
+    cv::sqrt(gx.mul(gx) + gy.mul(gy), grad);
+    int k = int(radius * 2) * 2 + 1;
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(k, k));
+    cv::Mat support;
+    cv::dilate(grad, support, kernel);
+    std::vector<float> v;
+    v.reserve((size_t)support.total());
+    for (int y = 0; y < support.rows; y++) {
+        const float* row = support.ptr<float>(y);
+        for (int x = 0; x < support.cols; x++) v.push_back(row[x]);
+    }
+    size_t idx = size_t(v.size() * 0.92);
+    std::nth_element(v.begin(), v.begin() + std::min(idx, v.size() - 1), v.end());
+    float hi = v[std::min(idx, v.size() - 1)];
+    if (hi < 1e-5f) return cv::Mat::zeros(support.size(), CV_32F);
+    return smoothstep(hi * 0.12f, hi * 0.55f, support);
+}
+
+inline cv::Mat sobel_mag(const cv::Mat& lum) {
+    cv::Mat gx, gy;
+    cv::Sobel(lum, gx, CV_32F, 1, 0, 3);
+    cv::Sobel(lum, gy, CV_32F, 0, 1, 3);
+    cv::Mat out;
+    cv::sqrt(gx.mul(gx) + gy.mul(gy), out);
+    return out / 255.0f;
+}
+
+struct EdgeAux {
+    float noise = 0.f;
+    float pre_sigma = 0.f;
+};
+
+inline void edge_field(const cv::Mat& img_bgr, float glow, float threshold, float env,
+                       cv::Mat& edges, EdgeAux& aux) {
+    (void)glow; (void)env;
+    cv::Mat lum = luminance(img_bgr);
+    float noise = noise_estimate(lum);
+    float pre_sigma = std::min(2.4f, std::max(0.0f, (noise - 2.0f) * 0.16f));
+    cv::Mat work = (pre_sigma > 0.05f) ? gaussian_blur(lum, pre_sigma) : lum;
+    cv::Mat base = gaussian_blur(work, 1.0f);
+    cv::Mat mag = sobel_mag(base);
+    float thr = threshold * (1.0f + pre_sigma * 0.38f);
+    cv::Mat edge = smoothstep(thr, thr + 0.22f, mag);
+    cv::Mat sup = support_mask(work, 1.0f + pre_sigma);
+    edge = edge.mul(smoothstep(0.04f, 0.30f, sup));
+    edges = edge;
+    aux.noise = noise;
+    aux.pre_sigma = pre_sigma;
+}
+
+inline float edge_density(const cv::Mat& edges) {
+    int64_t cnt = 0;
+    for (int y = 0; y < edges.rows; y++) {
+        const float* row = edges.ptr<float>(y);
+        for (int x = 0; x < edges.cols; x++)
+            if (row[x] > 0.35f) cnt++;
+    }
+    return float(cnt) / float(std::max<int64_t>(1, (int64_t)edges.total()));
+}
+
+inline void neon_glow_stack(const cv::Mat& img_bgr, const cv::Mat& edges,
+                            float glow, float env, float threshold,
+                            cv::Mat& energy) {
+    (void)img_bgr; (void)threshold;
+    float g = std::min(3.0f, std::max(0.1f, glow));
+    float density = edge_density(edges);
+    float calm = 1.0f / (1.0f + 3.5f * std::max(0.0f, density - 0.18f));
+    cv::Mat hot;
+    cv::min(edges * 1.25, 1.0, hot);
+    cv::Mat src = edges.mul(1.0 - 0.55 * hot);
+    cv::Mat glow_field = cv::Mat::zeros(edges.size(), CV_32F);
+    for (int i = 0; i < 4; i++) {
+        cv::Mat b = gaussian_blur(src, GLOW_SIGMAS[i]);
+        glow_field += b * (GLOW_WEIGHTS[i] * g * env * calm);
+    }
+    float excite = 0.72f + 0.42f * env;
+    energy = (edges * 1.15 + glow_field * 0.85) * excite;
+    cv::min(cv::max(energy, 0.f), 1.f, energy);
+    cv::Mat core;
+    cv::pow(edges, 1.2, core);
+    energy += core * (0.85 * 0.55);
+    cv::min(cv::max(energy, 0.f), 1.f, energy);
+}
+
+inline cv::Mat colorize(const cv::Mat& field, const std::string& palette, float lift = 0.0f) {
+    const cv::Mat& lut = palette_lut(palette);
+    cv::Mat x;
+    if (field.channels() == 1) x = field;
+    else {
+        std::vector<cv::Mat> ch;
+        cv::split(field, ch);
+        x = (ch[0] + ch[1] + ch[2]) / 3.0f;
+    }
+    cv::min(cv::max(x, 0.f), 1.f, x);
+    cv::Mat idx8;
+    x.convertTo(idx8, CV_8U, 255.0);
+    cv::Mat idx3, col, out;
+    cv::Mat idx_chs[3] = {idx8, idx8, idx8};
+    cv::merge(idx_chs, 3, idx3);
+    cv::LUT(idx3, lut, col);
+    col.convertTo(out, CV_32F);
+    if (lift > 0) out += lift * 255.0f * 0.045f;
+    cv::Mat out8;
+    out.convertTo(out8, CV_8U, 1.0);
+    return out8;
+}
+
+inline void process_image_neon(const cv::Mat& img_bgr, const std::string& palette,
+                               float glow, float threshold, float env,
+                               cv::Mat& out, EdgeAux& aux) {
+    cv::Mat edges;
+    edge_field(img_bgr, glow, threshold, env, edges, aux);
+    cv::Mat field;
+    neon_glow_stack(img_bgr, edges, glow, env, threshold, field);
+    out = colorize(field, palette);
+}
+
+inline std::string neonize_image_file(const std::string& inp, const std::string& out_path,
+                                      const std::string& palette, float glow,
+                                      float threshold, float env, StageTracker* tracker,
+                                      EdgeAux* aux_out = nullptr) {
+    cv::Mat img = cv::imread(inp, cv::IMREAD_COLOR);
+    if (img.empty()) throw std::runtime_error("cannot read image: " + inp);
+    if (tracker) tracker->step(0.5f);
+    EdgeAux aux;
+    cv::Mat out;
+    process_image_neon(img, palette, glow, threshold, env, out, aux);
+    if (tracker) tracker->step(0.9f);
+    std::string finalp = unique_output_path(out_path);
+    std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, 6};
+    cv::imwrite(finalp, out, params);
+    if (aux_out) *aux_out = aux;
+    return finalp;
+}
+
+}  // namespace neon

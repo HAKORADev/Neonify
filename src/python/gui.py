@@ -3,6 +3,7 @@ import sys
 import subprocess
 import threading
 import time
+import datetime
 import json
 import tempfile
 from pathlib import Path
@@ -11,7 +12,8 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QFrame, QLabel, QPushButton, QComboBox, QSlider, QCheckBox,
     QFileDialog, QProgressBar, QScrollArea, QSizePolicy,
-    QMessageBox, QGroupBox, QListWidget, QStackedWidget
+    QMessageBox, QGroupBox, QListWidget, QStackedWidget,
+    QDialog, QDoubleSpinBox, QDialogButtonBox
 )
 from PyQt5.QtCore import (
     Qt, QTimer, QThread, pyqtSignal, QRectF, QRect, QPoint, QUrl
@@ -53,15 +55,20 @@ THEME = {
 
 def get_icon_path():
     icon_name = 'logo.png'
+    candidates = []
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-        icon_path = os.path.join(sys._MEIPASS, icon_name)
-    else:
-        try:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-        except NameError:
-            base_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-        icon_path = os.path.join(base_dir, icon_name)
-    return icon_path
+        candidates.append(os.path.join(sys._MEIPASS, icon_name))
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(sys.executable)), icon_name))
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        base_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    candidates.append(os.path.join(base_dir, icon_name))
+    candidates.append(os.path.join(base_dir, os.pardir, 'assets', icon_name))
+    for icon_path in candidates:
+        if os.path.exists(icon_path):
+            return icon_path
+    return candidates[-1]
 
 
 def load_app_icon():
@@ -633,18 +640,38 @@ class ProcessingThread(QThread):
 IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.webp'}
 VIDEO_EXTS = {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v'}
 AUDIO_EXTS = {'.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.wma', '.opus'}
-MESH_EXTS = {'.obj', '.stl'}
+MESH_EXTS = {'.obj', '.stl', '.ply'}
 SUPPORTED_EXTS = IMAGE_EXTS | VIDEO_EXTS | AUDIO_EXTS | MESH_EXTS
-PALETTE_NAMES = ['electric', 'synthwave', 'toxic', 'ice', 'fire', 'ghost', 'spectrum']
+PALETTE_NAMES = ['electric', 'crimson', 'ice', 'toxic', 'violet', 'golden', 'ghost']
 PALETTE_WAVE_COLORS = {
     'electric': ((14, 54, 200), (70, 190, 255), (240, 252, 255)),
-    'synthwave': ((110, 18, 180), (250, 60, 150), (255, 232, 214)),
-    'toxic': ((18, 110, 28), (110, 240, 60), (228, 255, 214)),
+    'crimson': ((180, 16, 42), (255, 70, 120), (255, 240, 244)),
     'ice': ((36, 74, 142), (140, 205, 245), (255, 255, 255)),
-    'fire': ((172, 22, 4), (255, 118, 14), (255, 246, 224)),
+    'toxic': ((18, 110, 28), (110, 240, 60), (228, 255, 214)),
+    'violet': ((90, 18, 180), (190, 80, 255), (244, 236, 255)),
+    'golden': ((170, 90, 10), (250, 190, 60), (255, 248, 214)),
     'ghost': ((86, 86, 94), (198, 201, 208), (255, 255, 255)),
-    'spectrum': ((198, 38, 122), (250, 190, 60), (88, 220, 180)),
 }
+AUDIO_PROFILE_INFO = [
+    ('slash', 'the signature diagonal energy sweep'),
+    ('fire', 'burn — crackle, rumble, flicker, heat drive'),
+    ('ice', 'ice-steam — octave shimmer, airy shelf, glassy breath'),
+    ('robotic', 'metal ring-mod, formant combs, crushed edges'),
+    ('ghost', 'fog — breathing dark reverb, whisper detune'),
+    ('void', 'the abyss — octave-down, huge dark space'),
+    ('echo', 'proper clean ping-pong echo, tone-shaped'),
+]
+
+
+def engine_module():
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        if base_dir not in sys.path:
+            sys.path.insert(0, base_dir)
+        import neonify
+        return neonify
+    except Exception:
+        return None
 
 
 def audio_envelope(path, points=1000):
@@ -668,8 +695,10 @@ def audio_envelope(path, points=1000):
 
 def detect_command(path):
     ext = Path(path).suffix.lower()
-    if ext in IMAGE_EXTS or ext in VIDEO_EXTS:
-        return 'neon'
+    if ext in IMAGE_EXTS:
+        return 'image'
+    if ext in VIDEO_EXTS:
+        return 'video'
     if ext in AUDIO_EXTS:
         return 'audio'
     if ext in MESH_EXTS:
@@ -679,13 +708,14 @@ def detect_command(path):
 
 def default_output_for(path, command, turntable=0):
     p = Path(path)
+    stamp = datetime.datetime.now().strftime("_%y%m%d%H%M%S")
     if command == 'audio':
-        return str(p.parent / f"{p.stem}_neon.wav")
+        return str(p.parent / f"{p.stem}_neon{stamp}.wav")
     if command == 'mesh':
         if turntable > 0:
-            return str(p.parent / f"{p.stem}_neon_turntable.mp4")
-        return str(p.parent / f"{p.stem}_neon.png")
-    return str(p.parent / f"{p.stem}_neon{p.suffix}")
+            return str(p.parent / f"{p.stem}_neon_turntable{stamp}.mp4")
+        return str(p.parent / f"{p.stem}_neon{stamp}.png")
+    return str(p.parent / f"{p.stem}_neon{stamp}{p.suffix}")
 
 
 def script_base():
@@ -743,6 +773,78 @@ class FileList(QListWidget):
 
     def allPaths(self):
         return [self.item(i).text() for i in range(self.count())]
+
+
+class AdvancedAudioDialog(QDialog):
+
+    def __init__(self, profile, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Advanced audio settings")
+        self.setMinimumWidth(480)
+        self.setStyleSheet(
+            f"QDialog {{ background-color: {THEME['panel_background']}; }}"
+            f"QLabel {{ color: {THEME['text']}; background: transparent; }}"
+            f"QDoubleSpinBox {{ background-color: {THEME['surface']}; color: {THEME['text']};"
+            f"border: 1px solid {THEME['border']}; border-radius: 4px; padding: 4px; }}")
+        self.advanced = None
+        eng = engine_module()
+        self.schema = dict(getattr(eng, 'AUDIO_ADVANCED_SCHEMA', {}) or {})
+        lay = QVBoxLayout(self)
+        prow = QHBoxLayout()
+        plabel = QLabel("Profile")
+        self.profile_combo = QComboBox()
+        for name, desc in AUDIO_PROFILE_INFO:
+            self.profile_combo.addItem(f"{name} — {desc}", name)
+        idx = self.profile_combo.findData(profile)
+        if idx >= 0:
+            self.profile_combo.setCurrentIndex(idx)
+        self.profile_combo.currentIndexChanged.connect(self._rebuild)
+        prow.addWidget(plabel)
+        prow.addWidget(self.profile_combo, 1)
+        lay.addLayout(prow)
+        self.hint = QLabel("")
+        self.hint.setWordWrap(True)
+        self.hint.setStyleSheet(f"color: {THEME['text_secondary']}; font-size: 11px;")
+        lay.addWidget(self.hint)
+        self.rows = QWidget()
+        self.rows_lay = QVBoxLayout(self.rows)
+        self.rows_lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.rows)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+        self._rebuild()
+
+    def _rebuild(self):
+        profile = self.profile_combo.currentData()
+        while self.rows_lay.count():
+            item = self.rows_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self.spins = {}
+        schema = self.schema.get(profile, [])
+        if not schema:
+            self.hint.setText("Advanced parameters are not available for this profile (engine schema missing).")
+            return
+        self.hint.setText("Overrides the profile's tuned defaults — leave untouched to keep the stock sound.")
+        for key, desc, lo, hi, dflt in schema:
+            row = QHBoxLayout()
+            lab = QLabel(desc)
+            spin = QDoubleSpinBox()
+            spin.setRange(lo, hi)
+            spin.setDecimals(2)
+            spin.setSingleStep(max((hi - lo) / 100.0, 0.01))
+            spin.setValue(dflt)
+            row.addWidget(lab, 1)
+            row.addWidget(spin)
+            self.rows_lay.addLayout(row)
+            self.spins[key] = spin
+
+    def _accept(self):
+        self.advanced = {k: round(s.value(), 3) for k, s in self.spins.items()}
+        self.accept()
 
 
 class NeonifyGUI(QMainWindow):
@@ -889,15 +991,34 @@ class NeonifyGUI(QMainWindow):
         self.turntable_check.setStyleSheet(get_checkbox_style())
         settings.addWidget(self.turntable_check)
 
-        device_row = QHBoxLayout()
-        device_label = QLabel("Device")
-        device_label.setStyleSheet(f"color: {THEME['text_secondary']}; font-size: 12px; border: none;")
-        self.device_combo = QComboBox()
-        self.device_combo.addItems(["Auto (GPU if available)", "CPU", "GPU"])
-        self.device_combo.setStyleSheet(get_combo_box_style())
-        device_row.addWidget(device_label)
-        device_row.addWidget(self.device_combo, 1)
-        settings.addLayout(device_row)
+        audio_row = QHBoxLayout()
+        audio_label = QLabel("Audio profile")
+        audio_label.setStyleSheet(f"color: {THEME['text_secondary']}; font-size: 12px; border: none;")
+        self.profile_combo = QComboBox()
+        for name, desc in AUDIO_PROFILE_INFO:
+            self.profile_combo.addItem(f"{name} — {desc}", name)
+        self.profile_combo.setStyleSheet(get_combo_box_style())
+        audio_row.addWidget(audio_label)
+        audio_row.addWidget(self.profile_combo, 1)
+        settings.addLayout(audio_row)
+
+        self.neon_audio_check = QCheckBox("Neonify audio with video")
+        self.neon_audio_check.setStyleSheet(get_checkbox_style())
+        settings.addWidget(self.neon_audio_check)
+
+        self.spatial_check = QCheckBox("Spatial glow (stereo pan)")
+        self.spatial_check.setStyleSheet(get_checkbox_style())
+        self.spatial_check.setChecked(True)
+        settings.addWidget(self.spatial_check)
+
+        self.hwaccel_check = QCheckBox("ffmpeg hwaccel decode (optional)")
+        self.hwaccel_check.setStyleSheet(get_checkbox_style())
+        settings.addWidget(self.hwaccel_check)
+
+        self.adv_audio_btn = QPushButton("Advanced audio settings…")
+        self.adv_audio_btn.setStyleSheet(get_secondary_button_style())
+        self.adv_audio_btn.clicked.connect(self._open_advanced_audio)
+        settings.addWidget(self.adv_audio_btn)
 
         self.process_btn = QPushButton("NEONIFY")
         self.process_btn.setStyleSheet(get_accent_button_style())
@@ -991,14 +1112,19 @@ class NeonifyGUI(QMainWindow):
         if mode_idx == 0:
             return detected
         if mode_idx == 1:
-            return 'neon' if detected in ('neon', None) else detected
+            return detected if detected in ('image', 'video') else None
         if mode_idx == 2:
             return 'audio'
         return 'mesh'
 
-    def _device_arg(self):
-        idx = self.device_combo.currentIndex()
-        return {0: 'auto', 1: 'cpu', 2: 'gpu'}[idx]
+    def _open_advanced_audio(self):
+        dlg = AdvancedAudioDialog(self.profile_combo.currentData(), self)
+        if dlg.exec_() == QDialog.Accepted and dlg.advanced is not None:
+            self.advanced_json = json.dumps(dlg.advanced)
+            self.adv_audio_btn.setText("Advanced audio: on")
+
+    def _advanced_json(self):
+        return getattr(self, 'advanced_json', None)
 
     def _process(self):
         paths = self.file_list.allPaths()
@@ -1020,9 +1146,20 @@ class NeonifyGUI(QMainWindow):
                 '--palette', self.palette_combo.currentData(),
                 '--glow', f"{self.glow_slider.value() / 100.0:g}",
                 '--threshold', f"{self.thr_slider.value() / 100.0:g}",
-                '--device', self._device_arg(),
                 '-o', output,
             ]
+            if command in ('audio', 'video'):
+                args.extend(['--profile', self.profile_combo.currentData()])
+                adv = self._advanced_json()
+                if adv:
+                    args.extend(['--advanced-audio', adv])
+            if command == 'video':
+                if self.neon_audio_check.isChecked():
+                    args.append('--neon-audio')
+                if not self.spatial_check.isChecked():
+                    args.append('--no-spatial')
+                if self.hwaccel_check.isChecked():
+                    args.append('--hwaccel')
             if turntable > 0:
                 args.extend(['--turntable', str(turntable)])
             commands.append(args)

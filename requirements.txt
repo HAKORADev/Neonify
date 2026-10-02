@@ -2,5 +2,4 @@ numpy==1.26.4; python_version < "3.13"
 numpy>=2.1.0; python_version >= "3.13"
 opencv-python==4.10.0.84; python_version < "3.13"
 opencv-python>=4.10.0.84; python_version >= "3.13"
-tqdm
 PyQt5

@@ -1,12 +1,3 @@
-__pycache__/
-*.py[cod]
-*.egg-info/
+neonify_tmp_*
 build/
-dist/
-src/tmp/
-*.spec.bak
-.venv/
-venv/
-.vscode/
-.idea/
-.DS_Store
+test_assets/out/

@@ -1,0 +1,128 @@
+name: native build
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'release tag, e.g. v0.5.0'
+        required: true
+      publish:
+        description: 'replace the release zip asset in-place'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qtbase5-dev qtbase5-dev-tools libopencv-dev cmake ninja-build
+
+      - name: build
+        run: |
+          cmake -S src/cpp -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j
+
+      - name: collect portable bundle
+        run: |
+          mkdir -p dist/neonify-linux/lib dist/neonify-linux/plugins/platforms
+          cp build/neonify dist/neonify-linux/
+          copy_if () {
+            [ -f "dist/neonify-linux/lib/$1" ] || cp -L "$2" dist/neonify-linux/lib/
+          }
+          # every non-glibc shared lib the binary or the qt plugins need
+          for bin in build/neonify /usr/lib/x86_64-linux-gnu/qt5/plugins/platforms/libqxcb.so; do
+            ldd "$bin" | awk '/=> \//{print $3}' | while read -r so; do
+              case "$(basename "$so")" in
+                libc.so*|libm.so*|libdl*|libpthread*|librt.so*|ld-linux*|libgcc_s*|libstdc++*|libdbus*|libsystemd*|libselinux*|libpcre2*|libglib*|libz.so*|libbz2*|liblzma*|libzstd*|libgcrypt*|libgpg-error*|libGL*|libglx*|libGLdispatch*|libX11*|libXext*|libXrender*|libXcb*|libxkbcommon*|libICE*|libSM*|libfontconfig*|libfreetype*|libharfbuzz*|libpng*|libjpeg*|libtiff*|libwebp*|libopenjpip*|libopenjp2*|libIlmImf*|libImath*|libIex*|libHalf*|libtbb*|libgdcm*|libcharls*) ;;
+                *) cp -Ln "$so" dist/neonify-linux/lib/ 2>/dev/null || true ;;
+              esac
+            done
+          done
+          cp -L /usr/lib/x86_64-linux-gnu/qt5/plugins/platforms/libqxcb.so dist/neonify-linux/plugins/platforms/
+          cp -L /usr/lib/x86_64-linux-gnu/qt5/plugins/platforms/libqoffscreen.so dist/neonify-linux/plugins/platforms/ || true
+          printf '[Paths]\nPlugins=plugins\n' > dist/neonify-linux/qt.conf
+          cp src/assets/logo.png dist/neonify-linux/logo.png
+          tar -czf neonify-${{ inputs.version }}-linux.tar.gz -C dist neonify-linux
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neonify-linux
+          path: neonify-*-linux.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install qt 5.15
+        shell: pwsh
+        run: |
+          pip install aqtinstall
+          aqt install-qt windows desktop 5.15.2 win64_msvc2019_64 --outputdir D:\Qt
+
+      - name: install opencv 4.10
+        shell: pwsh
+        run: |
+          curl.exe -L -o D:\ocv.exe https://github.com/opencv/opencv/releases/download/4.10.0/opencv-4.10.0-windows.exe
+          7z x D:\ocv.exe -oD:\ocv
+
+      - name: build
+        shell: pwsh
+        run: |
+          cmake -S src/cpp -B build -G "Visual Studio 17 2022" -A x64 `
+            -DQt5_DIR="D:\Qt\5.15.2\msvc2019_64\lib\cmake\Qt5" `
+            -DOpenCV_DIR="D:\ocv\opencv\build\x64\vc16\lib"
+          cmake --build build --config Release -j
+
+      - name: deploy portable bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist\neonify-windows | Out-Null
+          Copy-Item build\Release\neonify.exe dist\neonify-windows\
+          & "D:\Qt\5.15.2\msvc2019_64\bin\windeployqt.exe" --no-translations `
+            --no-system-d3d-compiler --no-opengl-sw --compiler-runtime `
+            dist\neonify-windows\neonify.exe
+          Copy-Item D:\ocv\opencv\build\x64\vc16\bin\opencv_world4100.dll dist\neonify-windows\
+          Copy-Item src\assets\logo.png dist\neonify-windows\logo.png
+          Compress-Archive -Path dist\neonify-windows -DestinationPath neonify-${{ inputs.version }}-windows.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neonify-windows
+          path: neonify-*-windows.zip
+
+  release:
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    if: ${{ inputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: neonify-linux
+          path: pkgs
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: neonify-windows
+          path: pkgs
+
+      - name: replace release assets in-place
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp pkgs/neonify-*-linux.tar.gz "neonify-cpu-linux_${{ inputs.version }}.tar.gz"
+          cp pkgs/neonify-*-windows.zip "neonify-cpu-windows_${{ inputs.version }}.zip"
+          gh release upload ${{ inputs.version }} \
+            "neonify-cpu-linux_${{ inputs.version }}.tar.gz" \
+            "neonify-cpu-windows_${{ inputs.version }}.zip" --clobber
