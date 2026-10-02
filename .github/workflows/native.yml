@@ -7,7 +7,7 @@ on:
         description: 'release tag, e.g. v0.5.0'
         required: true
       publish:
-        description: 'replace the release zip asset in-place'
+        description: 'replace the release assets in-place'
         type: boolean
         default: false
 
@@ -15,7 +15,128 @@ permissions:
   contents: write
 
 jobs:
-  linux:
+  windows-cpp:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: cache static qt
+        id: qtcache
+        uses: actions/cache@v4
+        with:
+          path: D:\qts
+          key: qt-5.15.2-static-msvc-v3
+
+      - name: build static qt 5.15.2 (base + multimedia)
+        if: steps.qtcache.outputs.cache-hit != 'true'
+        shell: cmd
+        run: |
+          git clone --depth 1 --branch v5.15.2 https://github.com/qt/qtbase D:\src\qtbase
+          git clone --depth 1 --branch v5.15.2 https://github.com/qt/qtmultimedia D:\src\qtmultimedia
+          curl -L -o D:\jom.zip https://download.qt.io/official_releases/jom/jom.zip
+          mkdir D:\jom && tar -xf D:\jom.zip -C D:\jom
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          mkdir D:\src\build && cd /d D:\src\build
+          ..\qtbase\configure.bat -static -static-runtime -release -opensource -confirm-license -prefix D:\qts -nomake examples -nomake tests -platform win32-msvc -opengl desktop -no-openssl -no-dbus
+          D:\jom\jom.exe -j4
+          D:\jom\jom.exe -j4 install
+          cd /d D:\src\qtmultimedia
+          D:\qts\bin\qmake.exe
+          D:\jom\jom.exe -j4
+          D:\jom\jom.exe -j4 install
+
+      - name: build static opencv (core imgproc imgcodecs)
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch 4.10.0 https://github.com/opencv/opencv D:\src\opencv
+          cmake -S D:\src\opencv -B D:\src\ocvbuild -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF `
+            -DBUILD_LIST=core,imgproc,imgcodecs -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF `
+            -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DBUILD_JPEG=ON -DBUILD_PNG=ON `
+            -DBUILD_ZLIB=ON -DBUILD_WEBP=OFF -DBUILD_TIFF=OFF -DBUILD_OPENEXR=OFF `
+            -DBUILD_JPEG2000=OFF -DWITH_IPP=OFF -DWITH_ITT=OFF -DWITH_TBB=OFF `
+            -DWITH_FFMPEG=OFF -DWITH_GTK=OFF -DWITH_WEBP=OFF -DWITH_OPENEXR=OFF -DWITH_TIFF=OFF -DWITH_JASPER=OFF
+          cmake --build D:\src\ocvbuild --config Release -j 4
+
+      - name: generate static plugin imports
+        shell: pwsh
+        run: |
+          $py = @'
+          import re, os
+          def find_class(folder):
+              for root, _, files in os.walk(folder):
+                  for f in files:
+                      if not f.endswith(('.h', '.cpp')):
+                          continue
+                      p = os.path.join(root, f)
+                      src = open(p, encoding='utf-8', errors='ignore').read()
+                      i = src.find('Q_PLUGIN_METADATA')
+                      if i < 0:
+                          continue
+                      seg = src[max(0, i - 500):i]
+                      names = re.findall(r'class\s+([A-Za-z0-9_]+)', seg)
+                      if names:
+                          return names[-1], os.path.basename(root)
+              return None, None
+          pairs = []
+          for folder, need in [
+              (r'D:\src\qtbase\src\plugins\platforms\windows', 'platform'),
+              (r'D:\src\qtbase\src\plugins\audio\qtaudio_windows', 'audio'),
+              (r'D:\src\qtmultimedia\src\plugins\wmf', 'wmf'),
+              (r'D:\src\qtmultimedia\src\plugins\dsengine', 'ds')]:
+              cls, _ = find_class(folder)
+              print('found', need, '=', cls)
+              if cls:
+                  pairs.append((need, cls))
+          os.makedirs(r'D:\src\gen', exist_ok=True)
+          with open(r'D:\src\gen\neon_plugins.h', 'w') as f:
+              f.write('#pragma once\n#include <QtPlugin>\n')
+              for _, cls in pairs:
+                  f.write('Q_IMPORT_PLUGIN(%s)\n' % cls)
+          print(open(r'D:\src\gen\neon_plugins.h').read())
+          '@
+          $py | Out-File -Encoding utf8 D:\src\gen_plugins.py
+          python D:\src\gen_plugins.py
+          Copy-Item D:\src\gen\neon_plugins.h "$env:GITHUB_WORKSPACE\src\cpp\src\neon_plugins.h"
+
+      - name: build neonify (single exe, /MT, WIN32)
+        shell: pwsh
+        run: |
+          cmake -S src/cpp -B build -G "Visual Studio 17 2022" -A x64 `
+            -DQt5_DIR="D:\qts\lib\cmake\Qt5" `
+            -DOpenCV_DIR="D:\src\ocvbuild"
+          cmake --build build --config Release -j 4
+
+      - name: collect portable bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist\neonify | Out-Null
+          Copy-Item build\Release\neonify.exe dist\neonify\
+          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile D:\ff.zip
+          Expand-Archive D:\ff.zip -DestinationPath D:\ff
+          $ff = Get-ChildItem D:\ff -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          Copy-Item $ff.FullName dist\neonify\
+          Copy-Item packaging\windows\cli.bat dist\neonify\
+          Copy-Item packaging\windows\cmd.bat dist\neonify\
+          $readme = @"
+          NEONIFY v${{ inputs.version }} - native windows build
+
+          neonify.exe   the app. double-click = gui
+          cli.bat       interactive cli
+          cmd.bat       terminal here
+          ffmpeg.exe    needed for video/audio (keep next to neonify.exe)
+
+          outputs land in results\ next to the app. everything runs on cpu.
+          "@
+          $readme | Out-File -Encoding utf8 dist\neonify\README.txt
+          Compress-Archive -Path dist\neonify -DestinationPath "neonify windows cpp v${{ inputs.version }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neonify-windows-cpp
+          path: neonify windows cpp v${{ inputs.version }}.zip
+
+  linux-cpp:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -24,84 +145,180 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            qtbase5-dev qtbase5-dev-tools libopencv-dev cmake ninja-build
+            libx11-dev libxcb1-dev libxext-dev libxrender-dev libxi-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev \
+            libfreetype6-dev libgl1-mesa-dev libglib2.0-dev ninja-build
 
-      - name: build
+      - name: cache static qt
+        id: qtcache
+        uses: actions/cache@v4
+        with:
+          path: /opt/qts
+          key: qt-5.15.2-static-linux-v3
+
+      - name: build static qt 5.15.2 (base + multimedia)
+        if: steps.qtcache.outputs.cache-hit != 'true'
         run: |
-          cmake -S src/cpp -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build -j
+          git clone --depth 1 --branch v5.15.2 https://github.com/qt/qtbase /opt/src/qtbase
+          git clone --depth 1 --branch v5.15.2 https://github.com/qt/qtmultimedia /opt/src/qtmultimedia
+          mkdir -p /opt/src/build && cd /opt/src/build
+          ../qtbase/configure -static -release -opensource -confirm-license \
+            -prefix /opt/qts -nomake examples -nomake tests -nomake tools \
+            -qt-xcb -opengl desktop -no-openssl -no-dbus
+          make -j"$(nproc)"
+          make install
+          cd /opt/src/qtmultimedia
+          /opt/qts/bin/qmake
+          make -j"$(nproc)"
+          make install
+
+      - name: build static opencv
+        run: |
+          git clone --depth 1 --branch 4.10.0 https://github.com/opencv/opencv /opt/src/opencv
+          cmake -S /opt/src/opencv -B /opt/src/ocvbuild -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_LIST=core,imgproc,imgcodecs -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF \
+            -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DBUILD_JPEG=ON -DBUILD_PNG=ON \
+            -DBUILD_ZLIB=ON -DBUILD_WEBP=OFF -DBUILD_TIFF=OFF -DBUILD_OPENEXR=OFF \
+            -DBUILD_JPEG2000=OFF -DWITH_IPP=OFF -DWITH_ITT=OFF -DWITH_TBB=OFF \
+            -DWITH_FFMPEG=OFF -DWITH_GTK=OFF -DWITH_WEBP=OFF -DWITH_OPENEXR=OFF -DWITH_TIFF=OFF -DWITH_JASPER=OFF
+          cmake --build /opt/src/ocvbuild -j "$(nproc)"
+
+      - name: generate static plugin imports
+        run: |
+          python3 - <<'EOF'
+          import re, os
+          def find_class(folder):
+              for root, _, files in os.walk(folder):
+                  for f in files:
+                      if not f.endswith(('.h', '.cpp')):
+                          continue
+                      p = os.path.join(root, f)
+                      src = open(p, encoding='utf-8', errors='ignore').read()
+                      i = src.find('Q_PLUGIN_METADATA')
+                      if i < 0:
+                          continue
+                      seg = src[max(0, i - 500):i]
+                      names = re.findall(r'class\s+([A-Za-z0-9_]+)', seg)
+                      if names:
+                          return names[-1]
+              return None
+          pairs = []
+          for folder, need in [
+              ('/opt/src/qtbase/src/plugins/platforms/xcb', 'xcb'),
+              ('/opt/src/qtbase/src/plugins/platforms/minimal', 'minimal'),
+              ('/opt/src/qtbase/src/plugins/platforms/offscreen', 'offscreen'),
+              ('/opt/src/qtmultimedia/src/plugins/gstreamer', 'gst')]:
+              cls = find_class(folder)
+              print('found', need, '=', cls)
+              if cls:
+                  pairs.append((need, cls))
+          os.makedirs('/opt/src/gen', exist_ok=True)
+          with open('/opt/src/gen/neon_plugins.h', 'w') as f:
+              f.write('#pragma once\n#include <QtPlugin>\n')
+              for _, cls in pairs:
+                  f.write('Q_IMPORT_PLUGIN(%s)\n' % cls)
+          print(open('/opt/src/gen/neon_plugins.h').read())
+          EOF
+          cp /opt/src/gen/neon_plugins.h src/cpp/src/neon_plugins.h
+
+      - name: build neonify
+        run: |
+          cmake -S src/cpp -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DQt5_DIR=/opt/qts/lib/cmake/Qt5 -DOpenCV_DIR=/opt/src/ocvbuild
+          cmake --build build -j "$(nproc)"
 
       - name: collect portable bundle
         run: |
-          mkdir -p dist/neonify-linux/lib dist/neonify-linux/plugins/platforms
-          cp build/neonify dist/neonify-linux/
-          copy_if () {
-            [ -f "dist/neonify-linux/lib/$1" ] || cp -L "$2" dist/neonify-linux/lib/
-          }
-          # every non-glibc shared lib the binary or the qt plugins need
-          for bin in build/neonify /usr/lib/x86_64-linux-gnu/qt5/plugins/platforms/libqxcb.so; do
-            ldd "$bin" | awk '/=> \//{print $3}' | while read -r so; do
-              case "$(basename "$so")" in
-                libc.so*|libm.so*|libdl*|libpthread*|librt.so*|ld-linux*|libgcc_s*|libstdc++*|libdbus*|libsystemd*|libselinux*|libpcre2*|libglib*|libz.so*|libbz2*|liblzma*|libzstd*|libgcrypt*|libgpg-error*|libGL*|libglx*|libGLdispatch*|libX11*|libXext*|libXrender*|libXcb*|libxkbcommon*|libICE*|libSM*|libfontconfig*|libfreetype*|libharfbuzz*|libpng*|libjpeg*|libtiff*|libwebp*|libopenjpip*|libopenjp2*|libIlmImf*|libImath*|libIex*|libHalf*|libtbb*|libgdcm*|libcharls*) ;;
-                *) cp -Ln "$so" dist/neonify-linux/lib/ 2>/dev/null || true ;;
-              esac
-            done
-          done
-          cp -L /usr/lib/x86_64-linux-gnu/qt5/plugins/platforms/libqxcb.so dist/neonify-linux/plugins/platforms/
-          cp -L /usr/lib/x86_64-linux-gnu/qt5/plugins/platforms/libqoffscreen.so dist/neonify-linux/plugins/platforms/ || true
-          printf '[Paths]\nPlugins=plugins\n' > dist/neonify-linux/qt.conf
-          cp src/assets/logo.png dist/neonify-linux/logo.png
-          tar -czf neonify-${{ inputs.version }}-linux.tar.gz -C dist neonify-linux
+          mkdir -p dist/neonify
+          cp build/neonify dist/neonify/
+          cp packaging/linux/cli.sh dist/neonify/ 2>/dev/null || true
+          chmod +x dist/neonify/neonify
+          cat > dist/neonify/README.txt <<EOF
+          NEONIFY v${{ inputs.version }} - native linux build
+
+          ./neonify      the app. no args = gui, "neonify cli" = interactive cli
+          ffmpeg         needed for video/audio (install: sudo apt install ffmpeg)
+
+          outputs land in results/ next to the app. everything runs on cpu.
+          EOF
+          tar -czf "neonify linux cpp v${{ inputs.version }}.tar.gz" -C dist neonify
 
       - uses: actions/upload-artifact@v4
         with:
-          name: neonify-linux
-          path: neonify-*-linux.tar.gz
+          name: neonify-linux-cpp
+          path: neonify linux cpp v${{ inputs.version }}.tar.gz
 
-  windows:
-    runs-on: windows-2022
+  windows-python:
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: install qt 5.15
-        shell: pwsh
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: install dependencies
         run: |
-          pip install aqtinstall
-          aqt install-qt windows desktop 5.15.2 win64_msvc2019_64 --outputdir D:\Qt
-
-      - name: install opencv 4.10
-        shell: pwsh
-        run: |
-          curl.exe -L -o D:\ocv.exe https://github.com/opencv/opencv/releases/download/4.10.0/opencv-4.10.0-windows.exe
-          7z x D:\ocv.exe -oD:\ocv
-
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
       - name: build
+        run: pyinstaller --clean --noconfirm neonify.spec
+      - name: collect portable bundle
         shell: pwsh
         run: |
-          cmake -S src/cpp -B build -G "Visual Studio 17 2022" -A x64 `
-            -DQt5_DIR="D:\Qt\5.15.2\msvc2019_64\lib\cmake\Qt5" `
-            -DOpenCV_DIR="D:\ocv\opencv\build\x64\vc16\lib"
-          cmake --build build --config Release -j
+          Copy-Item packaging\windows\cli.bat dist\neonify\
+          Copy-Item packaging\windows\cmd.bat dist\neonify\
+          $readme = @"
+          NEONIFY v${{ inputs.version }} - python build (windows)
 
-      - name: deploy portable bundle
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist\neonify-windows | Out-Null
-          Copy-Item build\Release\neonify.exe dist\neonify-windows\
-          & "D:\Qt\5.15.2\msvc2019_64\bin\windeployqt.exe" --no-translations `
-            --no-system-d3d-compiler --no-opengl-sw --compiler-runtime `
-            dist\neonify-windows\neonify.exe
-          Copy-Item D:\ocv\opencv\build\x64\vc16\bin\opencv_world4100.dll dist\neonify-windows\
-          Copy-Item src\assets\logo.png dist\neonify-windows\logo.png
-          Compress-Archive -Path dist\neonify-windows -DestinationPath neonify-${{ inputs.version }}-windows.zip
+          neonify.exe   the app. double-click = gui
+          cli.bat       interactive cli
+          cmd.bat       terminal here
+          ffmpeg        install once: winget install FFmpeg
 
+          outputs land in results\ next to the app.
+          "@
+          $readme | Out-File -Encoding utf8 dist\neonify\README.txt
+          Compress-Archive -Path dist\neonify -DestinationPath "neonify windows python v${{ inputs.version }}.zip"
       - uses: actions/upload-artifact@v4
         with:
-          name: neonify-windows
-          path: neonify-*-windows.zip
+          name: neonify-windows-python
+          path: neonify windows python v${{ inputs.version }}.zip
+
+  linux-python:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+      - name: build
+        run: pyinstaller --clean --noconfirm neonify.spec
+      - name: collect portable bundle
+        run: |
+          cp packaging/linux/cli.sh dist/neonify/ 2>/dev/null || true
+          cp packaging/linux/install.sh dist/neonify/ 2>/dev/null || true
+          cat > dist/neonify/README.txt <<EOF
+          NEONIFY v${{ inputs.version }} - python build (linux)
+
+          ./neonify      the app. no args = gui, "./neonify cli" = interactive cli
+          ffmpeg         install once: sudo apt install ffmpeg
+
+          outputs land in results/ next to the app.
+          EOF
+          tar -czf "neonify linux python v${{ inputs.version }}.tar.gz" -C dist neonify
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neonify-linux-python
+          path: neonify linux python v${{ inputs.version }}.tar.gz
 
   release:
-    needs: [linux, windows]
+    needs: [windows-cpp, linux-cpp, windows-python, linux-python]
     runs-on: ubuntu-latest
     if: ${{ inputs.publish }}
     steps:
@@ -109,20 +326,20 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: neonify-linux
-          path: pkgs
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: neonify-windows
           path: pkgs
 
       - name: replace release assets in-place
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp pkgs/neonify-*-linux.tar.gz "neonify-cpu-linux_${{ inputs.version }}.tar.gz"
-          cp pkgs/neonify-*-windows.zip "neonify-cpu-windows_${{ inputs.version }}.zip"
-          gh release upload ${{ inputs.version }} \
-            "neonify-cpu-linux_${{ inputs.version }}.tar.gz" \
-            "neonify-cpu-windows_${{ inputs.version }}.zip" --clobber
+          TAG="${{ inputs.version }}"
+          for a in $(gh api repos/$GITHUB_REPOSITORY/releases --jq ".[] | select(.tag_name==\"$TAG\") | .assets[].name"); do
+            id=$(gh api repos/$GITHUB_REPOSITORY/releases --jq ".[] | select(.tag_name==\"$TAG\") | .assets[] | select(.name==\"$a\") | .id")
+            gh api -X DELETE repos/$GITHUB_REPOSITORY/releases/assets/$id
+          done
+          gh release upload "$TAG" \
+            "pkgs/neonify-windows-cpp/neonify windows cpp v$TAG.zip" \
+            "pkgs/neonify-linux-cpp/neonify linux cpp v$TAG.tar.gz" \
+            "pkgs/neonify-windows-python/neonify windows python v$TAG.zip" \
+            "pkgs/neonify-linux-python/neonify linux python v$TAG.tar.gz" \
+            --clobber

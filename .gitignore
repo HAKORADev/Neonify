@@ -1,3 +1,4 @@
 neonify_tmp_*
 build/
 test_assets/out/
+src/cpp/src/neon_plugins.h
