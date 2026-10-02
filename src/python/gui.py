@@ -575,6 +575,7 @@ class ProcessingThread(QThread):
 
     def run(self):
         outputs = []
+        self.arrow_output = ''
         total = len(self.commands)
         try:
             for idx, command in enumerate(self.commands):
@@ -610,6 +611,8 @@ class ProcessingThread(QThread):
                         except json.JSONDecodeError:
                             pass
                     else:
+                        if '\u2192' in line and ('results' in line or line.rsplit('  ', 1)[-1].strip()):
+                            self.arrow_output = line.split('\u2192', 1)[1].split('(', 1)[0].strip()
                         if '%' in line:
                             import re
                             match = re.search(r'(\d+)%', line)
@@ -623,7 +626,8 @@ class ProcessingThread(QThread):
                 if self.process.returncode != 0:
                     self.processing_complete.emit(outputs, False)
                     return
-                output_path = self._extract_output(command)
+                output_path = self.arrow_output or self._extract_output(command)
+                self.arrow_output = ''
                 if output_path:
                     outputs.append(output_path)
                     self.file_done.emit(self.inputs[idx], output_path, "done")
@@ -1205,14 +1209,12 @@ class NeonifyGUI(QMainWindow):
             if command is None:
                 continue
             turntable = 120 if (self.turntable_check.isChecked() and command == 'mesh') else 0
-            output = default_output_for(p, command, turntable=turntable)
             args = list(base) + [
                 command, p,
                 '--json-progress',
                 '--palette', self.palette_combo.currentData(),
                 '--glow', f"{self.glow_slider.value() / 100.0:g}",
                 '--threshold', f"{self.thr_slider.value() / 100.0:g}",
-                '-o', output,
             ]
             if command in ('audio', 'video'):
                 args.extend(['--profile', self.profile_combo.currentData()])
