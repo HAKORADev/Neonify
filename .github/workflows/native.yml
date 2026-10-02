@@ -52,13 +52,16 @@ jobs:
         id: ocvcache
         uses: actions/cache@v4
         with:
-          path: D:\src\ocvbuild
-          key: opencv-4.10.0-static-msvc-v1
+          path: |
+            D:\src\ocvbuild
+            D:\src\opencv
+          key: opencv-4.10.0-static-msvc-v2
 
       - name: build static opencv (core imgproc imgcodecs)
         if: steps.ocvcache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
+          if (Test-Path D:\src\opencv\CMakeLists.txt) { Write-Host "opencv source cached"; exit 0 }
           git clone --depth 1 --branch 4.10.0 https://github.com/opencv/opencv D:\src\opencv
           cmake -S D:\src\opencv -B D:\src\ocvbuild -G "Visual Studio 17 2022" -A x64 `
             "-DCMAKE_BUILD_TYPE=Release" "-DBUILD_SHARED_LIBS=OFF" `
@@ -157,12 +160,15 @@ jobs:
         id: ocvcache
         uses: actions/cache@v4
         with:
-          path: /opt/src/ocvbuild
-          key: opencv-4.10.0-static-linux-v1
+          path: |
+            /opt/src/ocvbuild
+            /opt/src/opencv
+          key: opencv-4.10.0-static-linux-v2
 
       - name: build static opencv
         if: steps.ocvcache.outputs.cache-hit != 'true'
         run: |
+          if [ -f /opt/src/opencv/CMakeLists.txt ]; then echo "opencv source cached"; exit 0; fi
           git clone --depth 1 --branch 4.10.0 https://github.com/opencv/opencv /opt/src/opencv
           cmake -S /opt/src/opencv -B /opt/src/ocvbuild -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
