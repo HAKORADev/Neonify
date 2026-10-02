@@ -189,10 +189,10 @@ inline void image_relief_mesh(const cv::Mat& img_bgr, int grid, float depth, Mes
     cv::Mat lum = luminance(img_bgr);
     int h_gt = img_bgr.rows, w_gt = img_bgr.cols;
     int gh = std::max(10, int(float(grid) * h_gt / float(w_gt)));
-    cv::Mat small;
-    cv::resize(lum, small, cv::Size(grid, gh), 0, 0, cv::INTER_AREA);
-    cv::GaussianBlur(small, small, cv::Size(0, 0), std::max(1.2, grid * 0.02));
-    int h = small.rows, w = small.cols;
+    cv::Mat sm;
+    cv::resize(lum, sm, cv::Size(grid, gh), 0, 0, cv::INTER_AREA);
+    cv::GaussianBlur(sm, sm, cv::Size(0, 0), std::max(1.2, grid * 0.02));
+    int h = sm.rows, w = sm.cols;
     out.verts.clear();
     out.faces.clear();
     out.verts.reserve(size_t(w) * h);
@@ -200,7 +200,7 @@ inline void image_relief_mesh(const cv::Mat& img_bgr, int grid, float depth, Mes
         float yy = -1.0f + 2.0f * float(y) / float(std::max(1, h - 1));
         for (int x = 0; x < w; x++) {
             float xx = -float(w) / float(std::max(1, h)) + 2.0f * float(w) / float(std::max(1, h)) * float(x) / float(std::max(1, w - 1));
-            float z = (small.at<float>(y, x) / 255.0f - 0.5f) * 2.0f * depth;
+            float z = (sm.at<float>(y, x) / 255.0f - 0.5f) * 2.0f * depth;
             out.verts.emplace_back(xx, yy, z);
         }
     }
