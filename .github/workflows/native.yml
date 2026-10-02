@@ -25,37 +25,40 @@ jobs:
         uses: actions/cache@v4
         with:
           path: D:\qts
-          key: qt-5.15.2-static-msvc-v3
+          key: qt-5.15-static-msvc-v4
 
       - name: build static qt 5.15.2 (base + multimedia)
         if: steps.qtcache.outputs.cache-hit != 'true'
         shell: cmd
         run: |
-          git clone --depth 1 --branch v5.15.2 https://github.com/qt/qtbase D:\src\qtbase
-          git clone --depth 1 --branch v5.15.2 https://github.com/qt/qtmultimedia D:\src\qtmultimedia
-          curl -L -o D:\jom.zip https://download.qt.io/official_releases/jom/jom.zip
+          git clone --depth 1 -b 5.15 https://github.com/qt/qtbase D:\src\qtbase
+          git clone --depth 1 -b 5.15 https://github.com/qt/qtmultimedia D:\src\qtmultimedia
+          curl -L -o D:\jom.zip https://download.qt.io/official_releases/jom/jom.zip || exit /b 1
           mkdir D:\jom && tar -xf D:\jom.zip -C D:\jom
+          for /r D:\jom %%i in (jom.exe) do set "JOM=%%i"
+          if not defined JOM exit /b 1
+          echo using jom at %JOM%
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           mkdir D:\src\build && cd /d D:\src\build
-          ..\qtbase\configure.bat -static -static-runtime -release -opensource -confirm-license -prefix D:\qts -nomake examples -nomake tests -platform win32-msvc -opengl desktop -no-openssl -no-dbus
-          D:\jom\jom.exe -j4
-          D:\jom\jom.exe -j4 install
+          ..\qtbase\configure.bat -static -static-runtime -release -opensource -confirm-license -prefix D:\qts -nomake examples -nomake tests -platform win32-msvc -opengl desktop -no-openssl -no-dbus || exit /b 1
+          "%JOM%" -j4 || exit /b 1
+          "%JOM%" -j4 install || exit /b 1
           cd /d D:\src\qtmultimedia
-          D:\qts\bin\qmake.exe
-          D:\jom\jom.exe -j4
-          D:\jom\jom.exe -j4 install
+          D:\qts\bin\qmake.exe || exit /b 1
+          "%JOM%" -j4 || exit /b 1
+          "%JOM%" -j4 install || exit /b 1
 
       - name: build static opencv (core imgproc imgcodecs)
         shell: pwsh
         run: |
           git clone --depth 1 --branch 4.10.0 https://github.com/opencv/opencv D:\src\opencv
           cmake -S D:\src\opencv -B D:\src\ocvbuild -G "Visual Studio 17 2022" -A x64 `
-            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF `
-            -DBUILD_LIST=core,imgproc,imgcodecs -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF `
-            -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DBUILD_JPEG=ON -DBUILD_PNG=ON `
-            -DBUILD_ZLIB=ON -DBUILD_WEBP=OFF -DBUILD_TIFF=OFF -DBUILD_OPENEXR=OFF `
-            -DBUILD_JPEG2000=OFF -DWITH_IPP=OFF -DWITH_ITT=OFF -DWITH_TBB=OFF `
-            -DWITH_FFMPEG=OFF -DWITH_GTK=OFF -DWITH_WEBP=OFF -DWITH_OPENEXR=OFF -DWITH_TIFF=OFF -DWITH_JASPER=OFF
+            "-DCMAKE_BUILD_TYPE=Release" "-DBUILD_SHARED_LIBS=OFF" `
+            "-DBUILD_LIST=core,imgproc,imgcodecs" "-DBUILD_TESTS=OFF" "-DBUILD_PERF_TESTS=OFF" `
+            "-DBUILD_EXAMPLES=OFF" "-DBUILD_opencv_apps=OFF" "-DBUILD_JPEG=ON" "-DBUILD_PNG=ON" `
+            "-DBUILD_ZLIB=ON" "-DBUILD_WEBP=OFF" "-DBUILD_TIFF=OFF" "-DBUILD_OPENEXR=OFF" `
+            "-DWITH_IPP=OFF" "-DWITH_ITT=OFF" "-DWITH_TBB=OFF" `
+            "-DWITH_FFMPEG=OFF" "-DWITH_GTK=OFF" "-DWITH_WEBP=OFF" "-DWITH_OPENEXR=OFF" "-DWITH_TIFF=OFF" "-DWITH_JASPER=OFF"
           cmake --build D:\src\ocvbuild --config Release -j 4
 
       - name: generate static plugin imports
@@ -145,22 +148,23 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libx11-dev libxcb1-dev libxext-dev libxrender-dev libxi-dev \
+            libx11-dev libxcb1-dev libx11-xcb-dev libxext-dev libxrender-dev libxi-dev \
             libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev \
-            libfreetype6-dev libgl1-mesa-dev libglib2.0-dev ninja-build
+            libfreetype6-dev libgl1-mesa-dev libglib2.0-dev ninja-build \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
       - name: cache static qt
         id: qtcache
         uses: actions/cache@v4
         with:
           path: /opt/qts
-          key: qt-5.15.2-static-linux-v3
+          key: qt-5.15-static-linux-v4
 
       - name: build static qt 5.15.2 (base + multimedia)
         if: steps.qtcache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch v5.15.2 https://github.com/qt/qtbase /opt/src/qtbase
-          git clone --depth 1 --branch v5.15.2 https://github.com/qt/qtmultimedia /opt/src/qtmultimedia
+          git clone --depth 1 -b 5.15 https://github.com/qt/qtbase /opt/src/qtbase
+          git clone --depth 1 -b 5.15 https://github.com/qt/qtmultimedia /opt/src/qtmultimedia
           mkdir -p /opt/src/build && cd /opt/src/build
           ../qtbase/configure -static -release -opensource -confirm-license \
             -prefix /opt/qts -nomake examples -nomake tests -nomake tools \
