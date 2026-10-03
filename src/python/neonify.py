@@ -1559,6 +1559,14 @@ def _results_path(name):
     return os.path.join(results_dir(), name)
 
 
+def _fallback_out(inp, tag, ext, opts):
+    """results/ by default, next to the input when asked"""
+    name = _out_default(inp, tag, ext)
+    if opts.get('next_to_input'):
+        return os.path.join(os.path.dirname(os.path.abspath(inp)), name)
+    return _results_path(name)
+
+
 def _unique_or_default(explicit, fallback):
     return unique_output_path(explicit) if explicit else fallback
 
@@ -1567,7 +1575,7 @@ def flow_image(inputs, opts, tracker):
     outs = []
     for inp in inputs:
         print(f"{NEON_BLUE}\u25b6{NEON_RESET} {os.path.basename(inp)}")
-        fallback = _results_path(_out_default(inp, opts['palette']))
+        fallback = _fallback_out(inp, opts['palette'], None, opts)
         out = _unique_or_default(opts.get('output'), fallback)
         path, aux = neonize_image_file(inp, out, opts['palette'], opts['glow'],
                                        opts['threshold'], opts.get('env', 1.0), tracker)
@@ -1580,7 +1588,7 @@ def flow_video(inputs, opts, tracker):
     outs = []
     for inp in inputs:
         print(f"{NEON_BLUE}\u25b6{NEON_RESET} {os.path.basename(inp)}")
-        fallback = _results_path(_out_default(inp, opts['palette'], '.mp4'))
+        fallback = _fallback_out(inp, opts['palette'], '.mp4', opts)
         out = _unique_or_default(opts.get('output'), fallback)
         path, n = process_video_file(inp, out, opts['palette'], opts['glow'], opts['threshold'],
                                      opts.get('env', 1.0), audio_profile=opts.get('audio_profile'),
@@ -1596,7 +1604,7 @@ def flow_audio(inputs, opts, tracker):
     outs = []
     for inp in inputs:
         print(f"{NEON_BLUE}\u25b6{NEON_RESET} {os.path.basename(inp)}")
-        fallback = _results_path(_out_default(inp, opts.get('audio_profile') or 'slash', '.wav'))
+        fallback = _fallback_out(inp, opts.get('audio_profile') or 'slash', '.wav', opts)
         out = _unique_or_default(opts.get('output'), fallback)
         path = neonize_audio_file(inp, out, opts.get('audio_profile') or 'slash', opts['glow'],
                                   opts.get('advanced_audio'), tracker)
@@ -1610,7 +1618,7 @@ def flow_mesh(inputs, opts, tracker):
     for inp in inputs:
         print(f"{NEON_BLUE}\u25b6{NEON_RESET} {os.path.basename(inp)}")
         ext = '.mp4' if opts.get('turntable') else '.png'
-        fallback = _results_path(_out_default(inp, f"{opts['palette']}3d", ext))
+        fallback = _fallback_out(inp, f"{opts['palette']}3d", ext, opts)
         out = _unique_or_default(opts.get('output'), fallback)
         relief = opts.get('relief') or os.path.splitext(inp)[1].lower() not in MESH_EXTS
         if relief:
@@ -1801,6 +1809,8 @@ def build_parser():
                    help="what to do (default: gui)")
     p.add_argument('input', nargs='*', help="input file(s) or folder")
     p.add_argument('-o', '--output', help="output path (default: auto _timestamp name)")
+    p.add_argument('--next-to-input', action='store_true',
+                   help="save outputs next to the input file instead of results/")
     p.add_argument('--palette', choices=PALETTE_NAMES, default='electric')
     p.add_argument('--glow', type=float, default=1.0, help="glow intensity 0.1-3.0")
     p.add_argument('--threshold', type=float, default=0.12, help="edge threshold 0.02-0.5")
@@ -1877,7 +1887,8 @@ def main(argv=None):
             return 2
 
     opts = {'palette': args.palette, 'glow': args.glow, 'threshold': args.threshold,
-            'env': args.env, 'output': args.output, 'spatial': not args.no_spatial,
+            'env': args.env, 'output': args.output, 'next_to_input': args.next_to_input,
+            'spatial': not args.no_spatial,
             'neon_audio': args.neon_audio, 'audio_profile': args.profile,
             'advanced_audio': advanced, 'turntable': args.turntable,
             'azimuth': args.azimuth, 'elevation': args.elevation, 'depth': args.depth,

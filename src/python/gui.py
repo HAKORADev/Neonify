@@ -1040,6 +1040,10 @@ class NeonifyGUI(QMainWindow):
         self.hwaccel_check.setStyleSheet(get_checkbox_style())
         settings.addWidget(self.hwaccel_check)
 
+        self.next_to_input_check = QCheckBox("Save next to input instead of results/")
+        self.next_to_input_check.setStyleSheet(get_checkbox_style())
+        settings.addWidget(self.next_to_input_check)
+
         self.adv_audio_btn = QPushButton("Advanced audio settings…")
         self.adv_audio_btn.setStyleSheet(get_secondary_button_style())
         self.adv_audio_btn.clicked.connect(self._open_advanced_audio)
@@ -1228,6 +1232,8 @@ class NeonifyGUI(QMainWindow):
                     args.append('--no-spatial')
                 if self.hwaccel_check.isChecked():
                     args.append('--hwaccel')
+            if self.next_to_input_check.isChecked():
+                args.append('--next-to-input')
             if turntable > 0:
                 args.extend(['--turntable', str(turntable)])
             commands.append(args)
