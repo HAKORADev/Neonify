@@ -193,7 +193,8 @@ inline std::pair<std::string, int> process_video_file(
             cv::Mat frame(h, w, CV_8UC3, buf.data());
             cv::Mat edges;
             EdgeAux aux;
-            edge_field(frame, glow, threshold, env, edges, aux);
+            cv::Mat ang;
+            edge_field(frame, glow, threshold, env, edges, aux, &ang);
             cv::Mat field;
             neon_glow_stack(frame, edges, glow, env, threshold, field);
             if (!spatial_maps.empty() && frame_no < int64_t(spatial_maps.size())) {
@@ -204,8 +205,9 @@ inline std::pair<std::string, int> process_video_file(
                 float addk = 0.4f * std::min(2.5f, std::max(0.2f, glow));
                 field = cv::min(field + wide * addk, 1.0f);
             }
-            cv::Mat out = colorize(field, palette);
-            if (keep_inside) keep_inside_composite(out, frame, edges);
+            cv::Mat out = (palette == "spectrum") ? spectrum_colorize(field, ang)
+                                                  : colorize(field, palette);
+            if (keep_inside) keep_inside_composite(out, frame, edges, field);
             std::fwrite(out.data, 1, frame_bytes, wr.in);
             frame_no++;
             if (tracker && frame_no % 5 == 0)

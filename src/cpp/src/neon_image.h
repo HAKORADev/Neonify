@@ -26,7 +26,7 @@ inline bool imwrite_robust(const std::string& path, const cv::Mat& img,
     return write_file_bytes(path, buf.data(), buf.size());
 }
 
-inline const char* PALETTE_NAMES[] = {"electric", "crimson", "ice", "toxic", "violet", "golden", "ghost"};
+inline const char* PALETTE_NAMES[] = {"electric", "crimson", "ice", "toxic", "violet", "golden", "ghost", "spectrum"};
 inline constexpr float GLOW_SIGMAS[4] = {2.0f, 6.0f, 16.0f, 38.0f};
 inline constexpr float GLOW_WEIGHTS[4] = {0.9f, 0.62f, 0.45f, 0.32f};
 
@@ -84,6 +84,21 @@ inline cv::Mat build_palette_lut(const std::string& name, int n = 256) {
             r = 0.62f + 0.38f * std::pow(t, 1.8f);
             g = 0.68f + 0.32f * std::pow(t, 1.4f);
             b = 0.78f + 0.22f * t;
+        } else if (name == "spectrum") {
+            float h = t * 6.0f;
+            int i = int(std::fmod(h, 6.0f));
+            float f = h - std::floor(h);
+            float p = 0.1f, q = 0.1f + 0.9f * (1.0f - f), tt = 0.1f + 0.9f * f;
+            float rr, gg, bb;
+            switch (i) {
+                case 0: rr = 1.0f; gg = tt; bb = p; break;
+                case 1: rr = q; gg = 1.0f; bb = p; break;
+                case 2: rr = p; gg = 1.0f; bb = tt; break;
+                case 3: rr = p; gg = q; bb = 1.0f; break;
+                case 4: rr = tt; gg = p; bb = 1.0f; break;
+                default: rr = 1.0f; gg = p; bb = q; break;
+            }
+            r = rr; g = gg; b = bb;
         } else {
             r = 0.85f * std::pow(t, 3.4f);
             g = 0.25f + 0.75f * std::pow(t, 1.25f);
@@ -157,14 +172,24 @@ struct EdgeAux {
 };
 
 inline void edge_field(const cv::Mat& img_bgr, float glow, float threshold, float env,
-                       cv::Mat& edges, EdgeAux& aux) {
+                       cv::Mat& edges, EdgeAux& aux, cv::Mat* ang_out = nullptr) {
     (void)glow; (void)env;
     cv::Mat lum = luminance(img_bgr);
     float noise = noise_estimate(lum);
     float pre_sigma = std::min(2.4f, std::max(0.0f, (noise - 2.0f) * 0.16f));
     cv::Mat work = (pre_sigma > 0.05f) ? gaussian_blur(lum, pre_sigma) : lum;
     cv::Mat base = gaussian_blur(work, 1.0f);
-    cv::Mat mag = sobel_mag(base);
+    cv::Mat gx, gy;
+    cv::Sobel(base, gx, CV_32F, 1, 0, 3);
+    cv::Sobel(base, gy, CV_32F, 0, 1, 3);
+    cv::Mat mag;
+    cv::sqrt(gx.mul(gx) + gy.mul(gy), mag);
+    mag = mag / 255.0f;
+    if (ang_out) {
+        cv::Mat ang;
+        cv::phase(gx, gy, ang, false);
+        *ang_out = ang;
+    }
     float thr = threshold * (1.0f + pre_sigma * 0.38f);
     cv::Mat edge = smoothstep(thr, thr + 0.22f, mag);
     cv::Mat sup = support_mask(work, 1.0f + pre_sigma);
@@ -231,50 +256,74 @@ inline cv::Mat colorize(const cv::Mat& field, const std::string& palette, float 
     return out8;
 }
 
+// the rainbow law: edge direction paints the hue, energy paints the value
+inline cv::Mat spectrum_colorize(const cv::Mat& field, const cv::Mat& ang) {
+    cv::Mat hue = ang / (2.0f * float(M_PI));
+    int rows = field.rows, cols = field.cols;
+    cv::Mat out(rows, cols, CV_8UC3);
+    for (int y = 0; y < rows; y++) {
+        const float* fr = field.ptr<float>(y);
+        const float* ar = hue.ptr<float>(y);
+        uint8_t* orow = out.ptr<uint8_t>(y);
+        for (int x = 0; x < cols; x++) {
+            float e = std::min(1.0f, std::max(0.0f, fr[x]));
+            float h = ar[x] - std::floor(ar[x]);
+            float v = 0.15f + 0.85f * e;
+            float s = 0.9f;
+            float hf = h * 6.0f;
+            int i = int(hf) % 6;
+            float f = hf - std::floor(hf);
+            float p = v * (1.0f - s);
+            float q = v * (1.0f - s * f);
+            float t = v * (1.0f - s * (1.0f - f));
+            float r, g, b;
+            switch (i) {
+                case 0: r = v; g = t; b = p; break;
+                case 1: r = q; g = v; b = p; break;
+                case 2: r = p; g = v; b = t; break;
+                case 3: r = p; g = q; b = v; break;
+                case 4: r = t; g = p; b = v; break;
+                default: r = v; g = p; b = q; break;
+            }
+            orow[x * 3 + 0] = uint8_t(b * 255.0f + 0.5f);
+            orow[x * 3 + 1] = uint8_t(g * 255.0f + 0.5f);
+            orow[x * 3 + 2] = uint8_t(r * 255.0f + 0.5f);
+        }
+    }
+    return out;
+}
+
 inline void process_image_neon(const cv::Mat& img_bgr, const std::string& palette,
                                float glow, float threshold, float env,
                                cv::Mat& out, EdgeAux& aux, cv::Mat* field_out = nullptr,
                                cv::Mat* edges_out = nullptr) {
-    cv::Mat edges;
-    edge_field(img_bgr, glow, threshold, env, edges, aux);
+    cv::Mat edges, ang;
+    edge_field(img_bgr, glow, threshold, env, edges, aux, &ang);
     cv::Mat field;
     neon_glow_stack(img_bgr, edges, glow, env, threshold, field);
-    out = colorize(field, palette);
+    out = (palette == "spectrum") ? spectrum_colorize(field, ang) : colorize(field, palette);
     if (field_out) *field_out = field;
     if (edges_out) *edges_out = edges;
 }
 
-// keep-inside law: the regions enclosed by the detected edges keep their original
-// look; the edges themselves and everything outside stay neon
-inline cv::Mat keep_inside_mask(const cv::Mat& edges) {
-    cv::Mat e8;
-    edges.convertTo(e8, CV_8U, 255.0);
-    cv::threshold(e8, e8, 80, 255, cv::THRESH_BINARY);
-    cv::dilate(e8, e8, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5)));
-    cv::Mat padded = cv::Mat::zeros(e8.rows + 2, e8.cols + 2, CV_8U);
-    e8.copyTo(padded(cv::Rect(1, 1, e8.cols, e8.rows)));
-    cv::Mat inv;
-    cv::subtract(cv::Scalar::all(255), padded, inv);
-    cv::floodFill(inv, cv::Point(0, 0), cv::Scalar(128), nullptr, cv::Scalar(), cv::Scalar(), 4);
-    cv::Mat holes = (inv == 255);
-    cv::Mat holef;
-    holes.convertTo(holef, CV_32F, 1.0 / 255.0);
-    cv::Mat hole_in = holef(cv::Rect(1, 1, e8.cols, e8.rows)).clone();
-    cv::Mat soft = 1.0 - smoothstep(0.04f, 0.30f, edges);
-    cv::Mat m = hole_in.mul(soft);
-    return gaussian_blur(m, 1.2f);
-}
-
-inline void keep_inside_composite(cv::Mat& neon_out, const cv::Mat& orig_bgr, const cv::Mat& edges) {
-    if (neon_out.empty() || orig_bgr.empty() || edges.empty()) return;
-    cv::Mat m = keep_inside_mask(edges);
+// keep-inside law (owner's round-6 wording): nothing is wiped. the whole
+// original look stays under the effect; wherever the glow is strong the neon
+// takes over, everywhere else the original pixels survive untouched
+inline void keep_inside_composite(cv::Mat& neon_out, const cv::Mat& orig_bgr,
+                                  const cv::Mat& edges, const cv::Mat& field) {
+    if (neon_out.empty() || orig_bgr.empty() || edges.empty() || field.empty()) return;
+    cv::Mat m;
+    cv::max(field, edges * 0.85, m);
+    cv::min(cv::max(m, 0.f), 1.f, m);
+    cv::Mat soft;
+    cv::GaussianBlur(m, soft, cv::Size(0, 0), 0.8, 0.8, cv::BORDER_REPLICATE);
     cv::Mat m3;
-    cv::Mat chs[3] = {m, m, m};
+    cv::Mat chs[3] = {soft, soft, soft};
     cv::merge(chs, 3, m3);
     cv::Mat orig32, out32;
     orig_bgr.convertTo(orig32, CV_32F);
     neon_out.convertTo(out32, CV_32F);
-    cv::Mat mixed = out32.mul(1.0 - m3) + orig32.mul(m3);
+    cv::Mat mixed = orig32.mul(1.0 - m3) + out32.mul(m3);
     mixed.convertTo(neon_out, CV_8U);
 }
 
@@ -306,21 +355,21 @@ inline std::string neonize_image_file(const std::string& inp, const std::string&
     } else {
         bgr = img;
     }
-    if (tracker) tracker->step(0.5f);
+    if (tracker) {
+        tracker->set_stages({"edges", "bloom"});
+        tracker->begin_stage(0);
+    }
     EdgeAux aux;
     cv::Mat out, field, edges;
     process_image_neon(bgr, palette, glow, threshold, env, out, aux, &field, &edges);
-    if (keep_inside) keep_inside_composite(out, bgr, edges);
+    if (tracker) tracker->begin_stage(1);
+    if (keep_inside) keep_inside_composite(out, bgr, edges, field);
     if (!alpha8.empty()) {
-        cv::Mat a32, f32;
-        alpha8.convertTo(a32, CV_32F, 1.0 / 255.0);
-        cv::min(cv::max(field * 1.25, 0.f), 1.f, f32);
-        cv::Mat a8;
-        cv::Mat aacc = a32.mul(f32) * 255.0 + 0.5;
-        aacc.convertTo(a8, CV_8U);
+        // alpha law: transparency comes only from the source art. wiped pixels
+        // stay (dark), transparent pixels stay transparent — nothing else.
         std::vector<cv::Mat> och, bch;
         cv::split(out, bch);
-        och = {bch[0], bch[1], bch[2], a8};
+        och = {bch[0], bch[1], bch[2], alpha8};
         cv::merge(och, out);
     }
     if (tracker) tracker->step(0.9f);

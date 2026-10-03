@@ -55,7 +55,7 @@ jobs:
           path: |
             D:\src\ocvbuild
             D:\src\opencv
-          key: opencv-4.10.0-static-msvc-v2
+          key: opencv-4.10.0-static-msvc-v3
 
       - name: build static opencv (core imgproc imgcodecs)
         if: steps.ocvcache.outputs.cache-hit != 'true'
@@ -67,9 +67,9 @@ jobs:
             "-DCMAKE_BUILD_TYPE=Release" "-DBUILD_SHARED_LIBS=OFF" `
             "-DBUILD_LIST=core,imgproc,imgcodecs" "-DBUILD_TESTS=OFF" "-DBUILD_PERF_TESTS=OFF" `
             "-DBUILD_EXAMPLES=OFF" "-DBUILD_opencv_apps=OFF" "-DBUILD_JPEG=ON" "-DBUILD_PNG=ON" `
-            "-DBUILD_ZLIB=ON" "-DBUILD_WEBP=OFF" "-DBUILD_TIFF=OFF" "-DBUILD_OPENEXR=OFF" `
+            "-DBUILD_ZLIB=ON" "-DBUILD_WEBP=ON" "-DBUILD_TIFF=ON" "-DBUILD_OPENEXR=OFF" `
             "-DWITH_IPP=OFF" "-DWITH_ITT=OFF" "-DWITH_TBB=OFF" `
-            "-DWITH_FFMPEG=OFF" "-DWITH_GTK=OFF" "-DWITH_WEBP=OFF" "-DWITH_OPENEXR=OFF" "-DWITH_TIFF=OFF" "-DWITH_JASPER=OFF"
+            "-DWITH_FFMPEG=OFF" "-DWITH_GTK=OFF" "-DWITH_OPENEXR=OFF" "-DWITH_JASPER=OFF"
           cmake --build D:\src\ocvbuild --config Release -j 4
 
       - name: generate static plugin imports
@@ -97,6 +97,14 @@ jobs:
           Write-Host $outki
           $ki = Get-ChildItem "results\*_neonify_*.png" | Measure-Object
           if ($ki.Count -lt 2) { Write-Host "keep-inside smoke FAILED"; exit 1 }
+          $outj = & build\Release\neonify.exe image test_assets\text.jpg 2>&1 | Out-String
+          Write-Host $outj
+          $jpgs = Get-ChildItem "results\*.jpg" | Measure-Object
+          if ($jpgs.Count -lt 1) { Write-Host "jpg smoke FAILED"; exit 1 }
+          $outs = & build\Release\neonify.exe image test_assets\sweep.png --palette spectrum 2>&1 | Out-String
+          Write-Host $outs
+          $spec = Get-ChildItem "results\*_neonify_spectrum_*.png" | Measure-Object
+          if ($spec.Count -lt 1) { Write-Host "spectrum smoke FAILED"; exit 1 }
           New-Item -ItemType Directory -Force -Path "unicode dir" | Out-Null
           Copy-Item test_assets\text.png "unicode dir\ñéo öü.png"
           $outu = & build\Release\neonify.exe image "unicode dir\ñéo öü.png" 2>&1 | Out-String
@@ -172,7 +180,7 @@ jobs:
           path: |
             /opt/src/ocvbuild
             /opt/src/opencv
-          key: opencv-4.10.0-static-linux-v2
+          key: opencv-4.10.0-static-linux-v3
 
       - name: build static opencv
         if: steps.ocvcache.outputs.cache-hit != 'true'
@@ -183,9 +191,9 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
             -DBUILD_LIST=core,imgproc,imgcodecs -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF \
             -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DBUILD_JPEG=ON -DBUILD_PNG=ON \
-            -DBUILD_ZLIB=ON -DBUILD_WEBP=OFF -DBUILD_TIFF=OFF -DBUILD_OPENEXR=OFF \
+            -DBUILD_ZLIB=ON -DBUILD_WEBP=ON -DBUILD_TIFF=ON -DBUILD_OPENEXR=OFF \
             -DBUILD_JPEG2000=OFF -DWITH_IPP=OFF -DWITH_ITT=OFF -DWITH_TBB=OFF \
-            -DWITH_FFMPEG=OFF -DWITH_GTK=OFF -DWITH_WEBP=OFF -DWITH_OPENEXR=OFF -DWITH_TIFF=OFF -DWITH_JASPER=OFF
+            -DWITH_FFMPEG=OFF -DWITH_GTK=OFF -DWITH_OPENEXR=OFF -DWITH_JASPER=OFF
           cmake --build /opt/src/ocvbuild -j "$(nproc)"
 
       - name: generate static plugin imports
@@ -205,6 +213,10 @@ jobs:
           ls results/*_neonify_*.png > /dev/null || { echo "image smoke FAILED"; exit 1; }
           ./build/neonify image test_assets/text.png --keep-inside
           [ $(ls results/*_neonify_*.png | wc -l) -ge 2 ] || { echo "keep-inside smoke FAILED"; exit 1; }
+          ./build/neonify image test_assets/text.jpg
+          [ $(ls results/*.jpg | wc -l) -ge 1 ] || { echo "jpg smoke FAILED"; exit 1; }
+          ./build/neonify image test_assets/sweep.png --palette spectrum
+          [ $(ls results/*_neonify_spectrum_*.png | wc -l) -ge 1 ] || { echo "spectrum smoke FAILED"; exit 1; }
           mkdir -p "unicode dir"
           cp test_assets/text.png "unicode dir/ñéo öü.png"
           ./build/neonify image "unicode dir/ñéo öü.png"

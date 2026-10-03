@@ -15,7 +15,7 @@
 
 Neonify turns images, videos, audio and 3D meshes into neon art. It runs locally on your machine, no accounts, no uploads.
 
-Images: edges become glowing tubes, PNG transparency is kept, and an optional keep-inside mode preserves the original look inside the detected edges. Videos: the same treatment per frame, with an option to run the audio through it too. Audio: seven profiles (fire, ice, robotic, ghost, void, echo, slash) that each react to the Glow setting. 3D: OBJ / PLY / STL rendered as neon wireframes, still or as a 360° turntable video, plus image-to-relief remeshing with OBJ export.
+Images: edges become glowing tubes, PNG transparency follows the source art, and an optional keep-inside mode keeps the whole original look under the effect. Videos: the same treatment per frame, with an option to run the audio through it too. Audio: seven profiles (fire, ice, robotic, ghost, void, echo, slash) that each react to the Glow setting. 3D: OBJ / PLY / STL rendered as neon wireframes, still or as a 360° turntable video, plus image-to-relief remeshing with OBJ export.
 
 ## Download
 
@@ -59,7 +59,7 @@ Without a command, `neonify` opens the GUI. `neonify cli` opens the interactive 
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--palette` | `electric` | `electric`, `crimson`, `ice`, `toxic`, `violet`, `golden`, `ghost` |
+| `--palette` | `electric` | `electric`, `crimson`, `ice`, `toxic`, `violet`, `golden`, `ghost`, `spectrum` (rainbow edges) |
 | `--glow` | `1.0` | glow intensity 0.1–3.0 |
 | `--threshold` | `0.12` | edge sensitivity 0.02–0.5 |
 | `--env` | `1.0` | ambient detail 0–2 |

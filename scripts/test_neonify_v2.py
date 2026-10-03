@@ -12,6 +12,7 @@ from contextlib import redirect_stdout
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'src', 'python'))
 
+import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
 import neonify as N  # noqa: E402
@@ -193,6 +194,70 @@ src_txt = open(os.path.join(ROOT, 'src', 'python', 'neonify.py')).read()
 check('no --device flag anywhere', "'--device'" not in src_txt and '"--device"' not in src_txt)
 check('cli subcommand enters interactive mode', "args.command == 'cli'" in src_txt)
 check('no cuda/gpu theater in engine', 'cuda' not in src_txt.lower())
+
+# ---- round-6 laws -------------------------------------------------------------
+print("[round-6]")
+# spectrum palette: the rainbow law
+spec_out = N._results_path(N._out_default('text.png', 'spectrum', '.png'))
+spec_path, _ = N.neonize_image_file(os.path.join(ASSETS, 'text.png'), spec_out, 'spectrum')
+check('spectrum render exists', os.path.isfile(spec_path), spec_path)
+check('spectrum name carries tag', '_neonify_spectrum_' in os.path.basename(spec_path))
+
+# keep-inside: flat interior survives, output differs from the plain neon
+gray = np.full((120, 160, 3), 140, np.uint8)
+cv2.rectangle(gray, (30, 30), (129, 89), (40, 40, 40), 3)
+cv2.imwrite('flat_disc.png', gray)
+plain_p, _ = N.neonize_image_file('flat_disc.png', N._results_path('ki_plain.png'), 'electric')
+ki_p, _ = N.neonize_image_file('flat_disc.png', N._results_path('ki_keep.png'), 'electric',
+                               keep_inside=True)
+plain = N.imread_robust(plain_p)
+ki = N.imread_robust(ki_p)
+src_img = N.imread_robust('flat_disc.png')
+center = (60, 80)  # y, x inside the rectangle
+check('keep-inside keeps the flat interior',
+      ki is not None and abs(int(ki[center[0], center[1], 0]) - 140) < 35,
+      str(int(ki[center[0], center[1], 0]) if ki is not None else -1))
+check('keep-inside differs from plain neon',
+      ki is not None and plain is not None and
+      float(np.abs(ki.astype(np.float32) - plain.astype(np.float32)).mean()) > 8.0)
+
+# alpha law: output alpha == source alpha exactly (wiped stays, transparent stays)
+alpha_in = np.zeros((80, 80, 4), np.uint8)
+cv2.circle(alpha_in, (40, 40), 28, (0, 255, 255, 255), -1)
+alpha_in[10:14, 10:14] = (255, 255, 255, 90)  # a partially transparent pixel block
+cv2.imwrite('alpha_law_in.png', alpha_in)
+alpha_p, _ = N.neonize_image_file('alpha_law_in.png', N._results_path('alpha_law.png'), 'electric')
+out4 = N.imread_robust(alpha_p, cv2.IMREAD_UNCHANGED)
+ok_law = out4 is not None and out4.ndim == 3 and out4.shape[2] == 4
+if ok_law:
+    same = cv2.absdiff(out4[:, :, 3], alpha_in[:, :, 3]).max() == 0
+    check('alpha law: output alpha == source alpha', bool(same))
+    check('alpha law: wiped interior stays (dark, opaque)', int(out4[40, 40, 3]) == 255)
+else:
+    check('alpha law: output alpha == source alpha', False, 'no 4ch output')
+    check('alpha law: wiped interior stays (dark, opaque)', False)
+
+# jpg reading through the engine
+jpg_p, _ = N.neonize_image_file(os.path.join(ASSETS, 'text.jpg'),
+                                N._results_path('from_jpg.png'), 'ice')
+check('jpg input reads', os.path.isfile(jpg_p), str(jpg_p))
+
+# tracker hook fires with sane fracs (quiet + hook = the cli batch look)
+fracs = []
+tr = N.StageTracker()
+tr.quiet = True
+tr.hook = lambda label, f: fracs.append(f)
+tr.set_stages(['edges', 'bloom'])
+tr.begin_stage(0)
+tr.step(0.5)
+tr.begin_stage(1)
+tr.step(0.9)
+check('tracker hook fires with fracs in 0..1',
+      len(fracs) >= 2 and all(0.0 <= f <= 1.0 for f in fracs), str(fracs[:4]))
+check('tracker hook reaches near-complete', bool(fracs) and fracs[-1] > 0.9, str(fracs[-1:]))
+
+# spectrum palette listed last
+check('spectrum is the last palette', N.PALETTE_NAMES[-1] == 'spectrum', str(N.PALETTE_NAMES))
 
 print()
 print(f"=== {PASS} passed, {FAIL} failed ===")

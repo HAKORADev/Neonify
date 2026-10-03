@@ -653,7 +653,7 @@ VIDEO_EXTS = {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v'}
 AUDIO_EXTS = {'.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.wma', '.opus'}
 MESH_EXTS = {'.obj', '.stl', '.ply'}
 SUPPORTED_EXTS = IMAGE_EXTS | VIDEO_EXTS | AUDIO_EXTS | MESH_EXTS
-PALETTE_NAMES = ['electric', 'crimson', 'ice', 'toxic', 'violet', 'golden', 'ghost']
+PALETTE_NAMES = ['electric', 'crimson', 'ice', 'toxic', 'violet', 'golden', 'ghost', 'spectrum']
 PALETTE_WAVE_COLORS = {
     'electric': ((14, 54, 200), (70, 190, 255), (240, 252, 255)),
     'crimson': ((180, 16, 42), (255, 70, 120), (255, 240, 244)),
@@ -662,6 +662,7 @@ PALETTE_WAVE_COLORS = {
     'violet': ((90, 18, 180), (190, 80, 255), (244, 236, 255)),
     'golden': ((170, 90, 10), (250, 190, 60), (255, 248, 214)),
     'ghost': ((86, 86, 94), (198, 201, 208), (255, 255, 255)),
+    'spectrum': ((120, 20, 160), (60, 200, 120), (255, 230, 80)),
 }
 AUDIO_PROFILE_INFO = [
     ('slash', 'the signature diagonal energy sweep'),
@@ -812,20 +813,12 @@ class AdvancedAudioDialog(QDialog):
         self.advanced = None
         eng = engine_module()
         self.schema = dict(getattr(eng, 'AUDIO_ADVANCED_SCHEMA', {}) or {})
+        self.profile = profile
         lay = QVBoxLayout(self)
-        prow = QHBoxLayout()
-        plabel = QLabel("Profile")
-        self.profile_combo = QComboBox()
-        for name, desc in AUDIO_PROFILE_INFO:
-            self.profile_combo.addItem(f"{name} — {desc}", name)
-        idx = self.profile_combo.findData(profile)
-        if idx >= 0:
-            self.profile_combo.setCurrentIndex(idx)
-        self.profile_combo.currentIndexChanged.connect(self._rebuild)
-        prow.addWidget(plabel)
-        prow.addWidget(self.profile_combo, 1)
-        lay.addLayout(prow)
-        self.hint = QLabel("")
+        title = QLabel(f"profile: {profile}")
+        title.setStyleSheet(f"color: {THEME['text']}; font-weight: bold; background: transparent;")
+        lay.addWidget(title)
+        self.hint = QLabel("Overrides the profile's tuned defaults — leave untouched to keep the stock sound.")
         self.hint.setWordWrap(True)
         self.hint.setStyleSheet(f"color: {THEME['text_secondary']}; font-size: 11px;")
         lay.addWidget(self.hint)
@@ -840,7 +833,7 @@ class AdvancedAudioDialog(QDialog):
         self._rebuild()
 
     def _rebuild(self):
-        profile = self.profile_combo.currentData()
+        profile = self.profile
         while self.rows_lay.count():
             item = self.rows_lay.takeAt(0)
             w = item.widget()
@@ -1033,7 +1026,7 @@ class NeonifyGUI(QMainWindow):
         self.spatial_check.setChecked(True)
         settings.addWidget(self.spatial_check)
 
-        self.keep_inside_check = QCheckBox("Keep the inside (original look inside the edges)")
+        self.keep_inside_check = QCheckBox("Keep the original look under the effect (instead of edges only)")
         self.keep_inside_check.setStyleSheet(get_checkbox_style())
         settings.addWidget(self.keep_inside_check)
 

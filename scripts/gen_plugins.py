@@ -32,12 +32,15 @@ def main():
         targets = [
             (os.path.join(qtbase, 'src', 'plugins', 'platforms', 'windows'), 'qwindows'),
             (os.path.join(qtbase, 'src', 'plugins', 'audio', 'qtaudio_windows'), 'qtaudio_windows'),
+            (os.path.join(qtbase, 'src', 'plugins', 'imageformats', 'jpeg'), 'qjpeg'),
             (os.path.join(qtmulti, 'src', 'plugins', 'wmf'), 'wmfservice'),
             (os.path.join(qtmulti, 'src', 'plugins', 'dsengine'), 'dsengine'),
         ]
     else:
         targets = [
             (os.path.join(qtbase, 'src', 'plugins', 'platforms', 'xcb'), 'qxcb'),
+            (os.path.join(qtbase, 'src', 'plugins', 'audio', 'qtaudio_alsa'), 'qtaudio_alsa'),
+            (os.path.join(qtbase, 'src', 'plugins', 'imageformats', 'jpeg'), 'qjpeg'),
         ]
     pairs = []
     for folder, need in targets:

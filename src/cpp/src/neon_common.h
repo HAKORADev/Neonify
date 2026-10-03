@@ -40,6 +40,8 @@
 namespace neon {
 
 inline const char* NEON_BLUE = "\033[38;5;39m";
+inline const char* NEON_RED = "\033[38;5;203m";
+inline const char* NEON_WHITE = "\033[38;5;255m";
 inline const char* NEON_PINK = "\033[38;5;213m";
 inline const char* NEON_DIM  = "\033[38;5;245m";
 inline const char* NEON_BOLD = "\033[1m";
@@ -50,35 +52,16 @@ inline const char* APP_NAME = "NEONIFY";
 inline const char* APP_VER = "v0.5.0";
 
 // ---------------------------------------------------------------- banner
-// built-in 5x5 font — the banner the owner liked (ported verbatim)
-inline const char* const BANNER_GLYPHS[][5] = {
-    {"10001", "11001", "10101", "10011", "10001"},  // N
-    {"11111", "10000", "11110", "10000", "11111"},  // E
-    {"01110", "10001", "10001", "10001", "01110"},  // O
-    {"11111", "00100", "00100", "00100", "11111"},  // I
-    {"11111", "10000", "11110", "10000", "10000"},  // F
-    {"10001", "10001", "01010", "00100", "00100"},  // Y
+// 1:1 with the old python: pyfiglet "big" font, left half blue / right half
+// red, white subtitle, then the 60-char rule. rows captured verbatim.
+inline const char* const BANNER_ROWS[6] = {
+    " _   _ ______ ____  _   _ _____ ________     __",
+    "| \\ | |  ____/ __ \\| \\ | |_   _|  ____\\ \\   / /",
+    "|  \\| | |__ | |  | |  \\| | | | | |__   \\ \\_/ / ",
+    "| . ` |  __|| |  | | . ` | | | |  __|   \\   /  ",
+    "| |\\  | |___| |__| | |\\  |_| |_| |       | |   ",
+    "|_| \\_|______\\____/|_| \\_|_____|_|       |_|   ",
 };
-
-inline std::string banner_rows[5];
-
-inline void build_banner() {
-    const std::string word = "NEONIFY";
-    for (int r = 0; r < 5; r++) banner_rows[r].clear();
-    for (char ch : word) {
-        int g = -1;
-        switch (ch) {
-            case 'N': g = 0; break; case 'E': g = 1; break; case 'O': g = 2; break;
-            case 'I': g = 3; break; case 'F': g = 4; break; case 'Y': g = 5; break;
-            default: g = -1; break;
-        }
-        for (int r = 0; r < 5; r++) {
-            std::string row = (g >= 0) ? BANNER_GLYPHS[g][r] : "00000";
-            for (char c : row) banner_rows[r] += (c == '1') ? "\xe2\x96\x88" : " ";
-            banner_rows[r] += " ";
-        }
-    }
-}
 
 inline bool stdout_is_tty() {
 #ifdef _WIN32
@@ -89,16 +72,24 @@ inline bool stdout_is_tty() {
 }
 
 inline void print_banner() {
-    build_banner();
     if (!stdout_is_tty()) {
         std::printf("%s\n", APP_NAME);
         return;
     }
-    std::printf("%s%s%s\n", NEON_BLUE, NEON_BOLD, banner_rows[0].c_str());
-    std::printf("%s%s%s\n", NEON_BLUE, banner_rows[1].c_str(), NEON_RESET);
-    std::printf("%s%s%s\n", NEON_PINK, banner_rows[2].c_str(), NEON_RESET);
-    std::printf("%s%s%s%s%s\n", NEON_PINK, banner_rows[3].c_str(), NEON_RESET, NEON_DIM, APP_VER);
-    std::printf("%s%s%s\n\n", NEON_BLUE, banner_rows[4].c_str(), NEON_RESET);
+    const std::string blank(47, ' ');
+    const size_t mid = 23;
+    std::printf("\n");
+    for (int r = 0; r < 6; r++) {
+        std::string line = BANNER_ROWS[r];
+        line += blank.substr(line.size());
+        std::printf("%s%s%s%s%s%s\n", NEON_BLUE, line.substr(0, mid).c_str(), NEON_RESET,
+                    NEON_RED, line.substr(mid).c_str(), NEON_RESET);
+    }
+    for (int r = 0; r < 2; r++)
+        std::printf("%s%s%s%s%s%s\n", NEON_BLUE, blank.substr(0, mid).c_str(), NEON_RESET,
+                    NEON_RED, blank.substr(mid).c_str(), NEON_RESET);
+    std::printf("%s              procedural neon engine %s%s\n", NEON_WHITE, APP_VER, NEON_RESET);
+    std::printf("============================================================\n");
 }
 
 // ------------------------------------------------------- unicode-safe file io
@@ -188,6 +179,13 @@ inline std::wstring wide_from_utf8(const std::string& s) {
     std::wstring w((size_t)std::max(len, 1), L'\0');
     if (len > 0) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &w[0], len);
     return w;
+}
+inline std::string utf8_from_wide(const std::wstring& w) {
+    int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string s((size_t)std::max(len, 1), '\0');
+    if (len > 0) WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &s[0], len, nullptr, nullptr);
+    while (!s.empty() && s.back() == '\0') s.pop_back();
+    return s;
 }
 #endif
 

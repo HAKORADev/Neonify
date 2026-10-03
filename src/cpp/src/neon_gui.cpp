@@ -9,8 +9,6 @@
 #include "neon_gui_widgets.h"
 
 #include <QtWidgets>
-#include <QMediaPlayer>
-#include <QMediaContent>
 #include <QUrl>
 #include <QFileInfo>
 #include <QFileDialog>
@@ -283,12 +281,11 @@ signals:
     void preview_failed(const QString& msg);
 };
 
-// ---- advanced audio dialog (schema-driven, profile aware) -------------------
+// ---- advanced audio dialog (schema-driven, no profile picker — the profile
+// is chosen in the settings row; this dialog overrides its parameters) -------
 class AdvancedAudioDialog : public QDialog {
 public:
     std::map<std::string, float> overrides;
-    QComboBox* profile_combo = nullptr;
-    QLabel* hint = nullptr;
     QWidget* rows = nullptr;
     QVBoxLayout* rows_lay = nullptr;
     std::vector<QDoubleSpinBox*> spins;
@@ -297,20 +294,11 @@ public:
         setWindowTitle("Advanced audio settings");
         setMinimumWidth(480);
         QVBoxLayout* lay = new QVBoxLayout(this);
-        QHBoxLayout* prow = new QHBoxLayout;
-        prow->addWidget(new QLabel("Profile", this));
-        profile_combo = new QComboBox(this);
-        int pc = int(sizeof(neon::AUDIO_PROFILES) / sizeof(neon::AUDIO_PROFILES[0]));
-        for (int i = 0; i < pc; i++)
-            profile_combo->addItem(QString("%1 — %2")
-                                       .arg(neon::AUDIO_PROFILES[i])
-                                       .arg(QString::fromLatin1(neon::PROFILE_DESCRIPTIONS(neon::AUDIO_PROFILES[i]))),
-                                   QString::fromLatin1(neon::AUDIO_PROFILES[i]));
-        int idx = profile_combo->findData(prof);
-        if (idx >= 0) profile_combo->setCurrentIndex(idx);
-        prow->addWidget(profile_combo, 1);
-        lay->addLayout(prow);
-        hint = new QLabel(QString(), this);
+        QLabel* title = new QLabel(QStringLiteral("profile: ") + prof, this);
+        title->setStyleSheet("color:#e5e5e5;font-size:12px;font-weight:bold;");
+        lay->addWidget(title);
+        QLabel* hint = new QLabel(
+            QStringLiteral("overrides the profile's tuned defaults — leave untouched to keep the stock sound"), this);
         hint->setWordWrap(true);
         hint->setStyleSheet("color:#888888;font-size:11px;");
         lay->addWidget(hint);
@@ -326,25 +314,11 @@ public:
             accept();
         });
         connect(bb, &QDialogButtonBox::rejected, this, &QDialog::reject);
-        connect(profile_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this] { rebuild(); });
-        rebuild();
-    }
-
-    void rebuild() {
-        for (QDoubleSpinBox* sp : spins) sp->deleteLater();
-        spins.clear();
-        QLayoutItem* item;
-        while ((item = rows_lay->takeAt(0)) != nullptr) delete item;
-        QString prof = profile_combo->currentData().toString();
-        std::vector<int> matches;
-        for (int i = 0; i < neon::ADV_SCHEMA_ROWS; i++)
-            if (prof.toStdString() == neon::ADV_SCHEMA[i][0]) matches.push_back(i);
-        if (matches.empty()) {
-            hint->setText("advanced parameters are not available for this profile");
-            return;
-        }
-        hint->setText("overrides the profile's tuned defaults — leave untouched to keep the stock sound");
-        for (int i : matches) {
+        std::string profile = prof.toStdString();
+        int match = 0;
+        for (int i = 0; i < neon::ADV_SCHEMA_ROWS; i++) {
+            if (profile != neon::ADV_SCHEMA[i][0]) continue;
+            match++;
             QHBoxLayout* l = new QHBoxLayout;
             QLabel* lbl = new QLabel(QString::fromLatin1(neon::ADV_SCHEMA[i][2]), rows);
             QDoubleSpinBox* sp = new QDoubleSpinBox(rows);
@@ -358,6 +332,10 @@ public:
             l->addWidget(lbl, 1);
             l->addWidget(sp);
             rows_lay->addLayout(l);
+        }
+        if (!match) {
+            QLabel* none = new QLabel(QStringLiteral("this profile runs on fixed tuning — no parameters to override"), rows);
+            rows_lay->addWidget(none);
         }
     }
 };
@@ -475,16 +453,13 @@ public:
         l->addWidget(in_list, 1);
         QHBoxLayout* btns = new QHBoxLayout;
         QPushButton* add = new QPushButton("+ Add files", p);
-        QPushButton* clr = new QPushButton("Clear", p);
+        QPushButton* clr = new QPushButton("Clear inputs", p);
         btns->addWidget(add);
         btns->addWidget(clr);
         l->addLayout(btns);
         connect(add, &QPushButton::clicked, this, [this] { add_files_dialog(); });
         connect(clr, &QPushButton::clicked, this, [this] {
-            stop_center_media();
             in_list->clear();
-            viewer->reset();
-            center->setCurrentWidget(viewer);
             refresh_sections();
             refresh_run_enabled();
             status->setText(QString());
@@ -504,15 +479,19 @@ public:
         out_list = new QListWidget(p);
         l->addWidget(out_list, 1);
         QHBoxLayout* btns = new QHBoxLayout;
-        QPushButton* clr = new QPushButton("Clear previews", p);
-        btns->addWidget(clr);
-        btns->addStretch(1);
+        QPushButton* clr_prev = new QPushButton("Clear previews", p);
+        QPushButton* clr_res = new QPushButton("Clear results", p);
+        btns->addWidget(clr_prev);
+        btns->addWidget(clr_res);
         l->addLayout(btns);
-        connect(clr, &QPushButton::clicked, this, [this] {
+        connect(clr_prev, &QPushButton::clicked, this, [this] {
             stop_center_media();
-            out_list->clear();
             viewer->reset();
             center->setCurrentWidget(viewer);
+            status->setText(QString());
+        });
+        connect(clr_res, &QPushButton::clicked, this, [this] {
+            out_list->clear();
             status->setText(QString());
         });
         return p;
@@ -557,8 +536,8 @@ public:
         QHBoxLayout* r1 = new QHBoxLayout;
         r1->addWidget(new QLabel("palette", vis_section));
         palette_combo = new QComboBox(vis_section);
-        const char* palettes[] = {"electric", "crimson", "ice", "toxic", "violet", "golden", "ghost"};
-        for (const char* p : palettes) palette_combo->addItem(QString::fromLatin1(p));
+        for (const char* p : neon::PALETTE_NAMES)
+            palette_combo->addItem(QString::fromLatin1(p));
         r1->addWidget(palette_combo, 1);
         r1->addWidget(new QLabel("glow", vis_section));
         glow = mk_slider(10, 100, 50);
@@ -579,7 +558,7 @@ public:
         r2->addWidget(env_v);
         vl->addLayout(r2);
         QHBoxLayout* r3 = new QHBoxLayout;
-        keep_inside = new QCheckBox("keep the inside (original look inside the edges)", vis_section);
+        keep_inside = new QCheckBox("keep the original look under the effect (instead of edges only)", vis_section);
         r3->addWidget(keep_inside);
         r3->addStretch(1);
         vl->addLayout(r3);
@@ -762,12 +741,12 @@ public:
         Kind k = detect_kind(path);
         stop_center_media();
         if (k == KImage) {
-            QPixmap pm(path);
-            if (pm.isNull()) {
+            QImage img = load_image_robust(path);
+            if (img.isNull()) {
                 QMessageBox::warning(this, "Neonify", "cannot open image:\n" + path);
                 return;
             }
-            viewer->show_image(pm);
+            viewer->show_image(QPixmap::fromImage(img));
             center->setCurrentWidget(viewer);
             status->setText("preview: " + QFileInfo(path).fileName());
         } else if (k == KVideo) {
@@ -786,15 +765,18 @@ public:
             status->setText("rendering 3d orbit preview…");
             prev3d = new Preview3DWorker(path, this);
             connect(prev3d, &Preview3DWorker::preview_done, this, [this](const QString& mp4) {
-                status->setText("3d orbit ready — playing");
+                prev3d = nullptr;
+                status->setText("3d orbit ready");
                 viewer->show_video(mp4);
                 center->setCurrentWidget(viewer);
                 viewer->video->play();
             });
             connect(prev3d, &Preview3DWorker::preview_failed, this, [this](const QString& msg) {
+                prev3d = nullptr;
                 status->setText("3d preview failed");
                 QMessageBox::warning(this, "Neonify", "3d preview failed:\n" + msg);
             });
+            connect(prev3d, &QThread::finished, prev3d, &QObject::deleteLater);
             prev3d->start();
         }
     }
@@ -837,8 +819,8 @@ public:
             return;
         }
         QPixmap a, b;
-        if (has_orig) a.load(in);
-        b.load(out);
+        if (has_orig) a = QPixmap::fromImage(load_image_robust(in));
+        b = QPixmap::fromImage(load_image_robust(out));
         if (b.isNull()) {
             QMessageBox::warning(this, "Neonify", "cannot open result:\n" + out);
             return;

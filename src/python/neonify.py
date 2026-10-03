@@ -12,6 +12,12 @@ import subprocess
 import argparse
 import datetime
 import tempfile
+try:
+    import pyfiglet
+    HAS_PYFIGLET = True
+except ImportError:
+    HAS_PYFIGLET = False
+
 import numpy as np
 
 try:
@@ -23,7 +29,7 @@ AUDIO_SR = 22050
 APP_NAME = "NEONIFY"
 APP_VER = "v0.5.0"
 
-PALETTE_NAMES = ['electric', 'crimson', 'ice', 'toxic', 'violet', 'golden', 'ghost']
+PALETTE_NAMES = ['electric', 'crimson', 'ice', 'toxic', 'violet', 'golden', 'ghost', 'spectrum']
 
 # ------------------------------------------------------------------ banner
 # built-in 5x5 font (no pyfiglet needed) — the banner the owner liked
@@ -34,53 +40,44 @@ _BANNER_FONT = {
     'I': ["11111", "00100", "00100", "00100", "11111"],
     'F': ["11111", "10000", "11110", "10000", "10000"],
     'Y': ["10001", "10001", "01010", "00100", "00100"],
-    ' ': ["00000", "00000", "00000", "00000", "00000"],
-    ':': ["00000", "00100", "00000", "00100", "00000"],
-    '-': ["00000", "00000", "11111", "00000", "00000"],
-    '&': ["01100", "01100", "01010", "01101", "01110"],
-    'W': ["10001", "10001", "10101", "11011", "10001"],
-    'H': ["10001", "10001", "11111", "10001", "10001"],
-    'T': ["11111", "00100", "00100", "00100", "00100"],
-    'E'.lower(): ["01110", "10000", "11110", "10000", "01110"],
-    'D': ["11110", "10001", "10001", "10001", "11110"],
-    'M': ["10001", "11011", "10101", "10001", "10001"],
-    'A': ["01110", "10001", "11111", "10001", "10001"],
-    'V': ["10001", "10001", "10001", "01010", "00100"],
-    'R': ["11110", "10001", "11110", "10010", "10001"],
-    '.': ["00000", "00000", "00000", "00000", "00100"],
-    '0': ["01110", "10011", "10101", "11001", "01110"],
-    '5': ["11111", "10000", "11110", "00001", "11110"],
-    '.': ["00000", "00000", "00000", "00000", "00100"],
 }
+
+
+def print_banner():
+    title = "NEONIFY"
+    if HAS_PYFIGLET:
+        lines = pyfiglet.figlet_format(title, font="big").rstrip("\n").split("\n")
+    else:
+        lines = []
+        for row in range(5):
+            parts = []
+            for ch in title:
+                cell = _BANNER_FONT.get(ch, ["00000"] * 5)
+                parts.append(cell[row].replace("0", ".").replace("1", "\u2588"))
+            lines.append("  ".join(parts))
+    width = max(len(line) for line in lines)
+    mid = width // 2
+    blue = "\033[38;5;39m"
+    red = "\033[38;5;203m"
+    white = "\033[38;5;255m"
+    reset = "\033[0m"
+    if not sys.stdout.isatty():
+        print(APP_NAME)
+        return
+    print()
+    for line in lines:
+        colored = blue + line[:mid] + reset
+        colored += red + line[mid:] + reset
+        print(colored)
+    print(f"{white}              procedural neon engine {APP_VER}{reset}")
+    print("=" * 60)
+
 
 NEON_BLUE = "\033[38;5;39m"
 NEON_PINK = "\033[38;5;213m"
 NEON_DIM = "\033[38;5;245m"
 NEON_BOLD = "\033[1m"
 NEON_RESET = "\033[0m"
-
-
-def _banner_text():
-    word = "NEONIFY"
-    rows = ["", "", "", "", ""]
-    for ch in word:
-        glyph = _BANNER_FONT.get(ch, _BANNER_FONT[' '])
-        for r in range(5):
-            rows[r] += glyph[r].replace('1', '\u2588').replace('0', ' ') + " "
-    return rows
-
-
-def print_banner():
-    rows = _banner_text()
-    if not sys.stdout.isatty():
-        print(APP_NAME)
-        return
-    print(f"{NEON_BLUE}{NEON_BOLD}{rows[0]}{NEON_RESET}")
-    print(f"{NEON_BLUE}{rows[1]}{NEON_RESET}")
-    print(f"{NEON_PINK}{rows[2]}{NEON_RESET}")
-    print(f"{NEON_PINK}{rows[3]}{NEON_RESET}{NEON_DIM}  {APP_VER}{NEON_RESET}")
-    print(f"{NEON_BLUE}{rows[4]}{NEON_RESET}")
-    print()
 
 
 # ------------------------------------------------------------------ progress
@@ -96,6 +93,8 @@ class StageTracker:
     def __init__(self, enabled=True, json_mode=False):
         self.enabled = enabled
         self.json_mode = json_mode
+        self.quiet = False
+        self.hook = None
         self.stages = []
         self.current = -1
         self.pct = 0.0
@@ -154,6 +153,11 @@ class StageTracker:
         n = self.current + 1
         total = len(self.stages)
         label = name or (self.stages[self.current] if 0 <= self.current < len(self.stages) else "")
+        if self.hook is not None:
+            overall = (n - 1 + self.pct / 100.0) / max(1, total)
+            self.hook(label, max(0.0, min(1.0, overall)))
+        if self.quiet:
+            return
         if self.json_mode:
             overall = int((n - 1 + self.pct / 100.0) / max(1, total) * 100)
             sys.stdout.write(json.dumps({"percent": min(overall, 100), "step": label}) + "\n")
@@ -387,7 +391,10 @@ def edge_field(img_bgr, glow=1.0, threshold=0.12, env=1.0):
     work = gaussian_blur(lum, pre_sigma) if pre_sigma > 0.05 else lum
 
     base = gaussian_blur(work, 1.0)
-    mag = _sobel_mag(base)
+    gx = cv2.Sobel(base, cv2.CV_32F, 1, 0, 3)
+    gy = cv2.Sobel(base, cv2.CV_32F, 0, 1, 3)
+    mag = cv2.magnitude(gx, gy) / 255.0
+    ang = cv2.phase(gx, gy)  # 0..2pi, the rainbow law feeds on this
     thr = threshold * (1.0 + pre_sigma * 0.38)  # noise raises the blade
     edge = smoothstep(thr, thr + 0.22, mag)
 
@@ -395,7 +402,7 @@ def edge_field(img_bgr, glow=1.0, threshold=0.12, env=1.0):
     sup = _support_mask(work, 1.0 + pre_sigma)
     edge = edge * smoothstep(0.04, 0.30, sup)
 
-    aux = {"noise": noise, "pre_sigma": pre_sigma, "edge": edge}
+    aux = {"noise": noise, "pre_sigma": pre_sigma, "edge": edge, "ang": ang}
     return _f32(edge), aux
 
 
@@ -443,24 +450,44 @@ def colorize(field, palette, lift=0.0):
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
+def spectrum_colorize(field, ang):
+    """the rainbow law: edge direction paints the hue, energy paints the value"""
+    h = (ang / (2.0 * np.pi)) % 1.0
+    e = np.clip(field, 0.0, 1.0)
+    v = 0.15 + 0.85 * e
+    s = np.full_like(h, 0.9)
+    i = np.floor(h * 6.0).astype(np.int32) % 6
+    f = h * 6.0 - np.floor(h * 6.0)
+    p = v * (1.0 - s)
+    q = v * (1.0 - s * f)
+    t = v * (1.0 - s * (1.0 - f))
+    r = np.select([i == 0, i == 1, i == 2, i == 3, i == 4], [v, q, p, p, t], default=v)
+    g = np.select([i == 0, i == 1, i == 2, i == 3, i == 4], [t, v, v, q, p], default=p)
+    b = np.select([i == 0, i == 1, i == 2, i == 3, i == 4], [p, p, t, v, v], default=q)
+    out = np.stack([b, g, r], axis=-1)
+    return np.clip(out * 255.0 + 0.5, 0, 255).astype(np.uint8)
+
+
 def process_image_neon(img_bgr, palette='electric', glow=1.0, threshold=0.12, env=1.0):
     edges, aux = edge_field(img_bgr, glow, threshold, env)
     field = neon_glow_stack(img_bgr, edges, glow=glow, env=env, threshold=threshold)
-    return colorize(field, palette), aux
+    out = spectrum_colorize(field, aux['ang']) if palette == 'spectrum' else colorize(field, palette)
+    return out, aux
 
 
 def process_image_neon_ex(img_bgr, palette='electric', glow=1.0, threshold=0.12, env=1.0):
     """same as process_image_neon but also returns the raw intensity field (for alpha)"""
     edges, aux = edge_field(img_bgr, glow, threshold, env)
     field = neon_glow_stack(img_bgr, edges, glow=glow, env=env, threshold=threshold)
-    return colorize(field, palette), field, aux, edges
+    out = spectrum_colorize(field, aux['ang']) if palette == 'spectrum' else colorize(field, palette)
+    return out, field, aux, edges
 
 
 def _apply_alpha(neon_bgr, field, alpha):
-    """tubes on transparency: alpha = neon intensity * source alpha"""
-    a = np.clip(field * 1.25, 0.0, 1.0) * alpha
+    """alpha law: transparency comes only from the source art. wiped pixels
+    stay (dark), transparent pixels stay transparent — nothing else."""
     bgra = cv2.cvtColor(neon_bgr, cv2.COLOR_BGR2BGRA)
-    bgra[:, :, 3] = (a * 255.0 + 0.5).astype(np.uint8)
+    bgra[:, :, 3] = (np.clip(alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
     return bgra
 
 
@@ -488,25 +515,13 @@ def imwrite_robust(path, img, params=None):
         return False
 
 
-def keep_inside_mask(edges):
-    """regions enclosed by the detected edges, softened at the rim"""
-    e8 = (np.clip(edges, 0.0, 1.0) * 255.0).astype(np.uint8)
-    _, e8 = cv2.threshold(e8, 80, 255, cv2.THRESH_BINARY)
-    e8 = cv2.dilate(e8, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
-    padded = np.zeros((e8.shape[0] + 2, e8.shape[1] + 2), np.uint8)
-    padded[1:-1, 1:-1] = e8
-    inv = (255 - padded).astype(np.uint8)
-    ffmask = np.zeros((inv.shape[0] + 2, inv.shape[1] + 2), np.uint8)
-    cv2.floodFill(inv, ffmask, (0, 0), 128, flags=4)
-    holes = (inv == 255).astype(np.float32)[1:-1, 1:-1]
-    soft = 1.0 - smoothstep(0.04, 0.30, edges.astype(np.float32))
-    m = holes * soft
-    return cv2.GaussianBlur(m, (0, 0), 1.2)
-
-
-def keep_inside_composite(neon_out, orig_bgr, edges):
-    m = keep_inside_mask(edges)[..., None]
-    mixed = neon_out.astype(np.float32) * (1.0 - m) + orig_bgr.astype(np.float32) * m
+def keep_inside_composite(neon_out, orig_bgr, edges, field):
+    """nothing is wiped: the whole original look stays under the effect;
+    wherever the glow is strong the neon takes over, everywhere else the
+    original pixels survive untouched"""
+    m = np.clip(np.maximum(field, edges * 0.85), 0.0, 1.0)
+    m = cv2.GaussianBlur(m, (0, 0), 0.8)[..., None]
+    mixed = orig_bgr.astype(np.float32) * (1.0 - m) + neon_out.astype(np.float32) * m
     return np.clip(mixed + 0.5, 0, 255).astype(np.uint8)
 
 
@@ -522,14 +537,17 @@ def neonize_image_file(inp, out_path, palette='electric', glow=1.0,
     elif img.ndim == 2:
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
     if tracker:
-        tracker.step("neonizing")
+        tracker.set_stages(["edges", "bloom"])
+        tracker.begin_stage(0)
     out, field, aux, edges = process_image_neon_ex(img, palette, glow, threshold, env)
+    if tracker:
+        tracker.begin_stage(1)
     if keep_inside:
-        out = keep_inside_composite(out, img, edges)
+        out = keep_inside_composite(out, img, edges, field)
     if alpha is not None:
         out = _apply_alpha(out, field, alpha)
     if tracker:
-        tracker.step("saving")
+        tracker.step(0.9)
     out_path = unique_output_path(out_path)
     if not imwrite_robust(out_path, out, [cv2.IMWRITE_PNG_COMPRESSION, 6]):
         raise RuntimeError(f"cannot write image: {out_path}")
@@ -1156,7 +1174,7 @@ def process_video_file(inp, out_path, palette='electric', glow=1.0, threshold=0.
                 field = _f32(np.clip(field + wide * 0.4 * float(np.clip(glow, 0.2, 2.5)), 0, 1.0))
             out = colorize(field, palette)
             if keep_inside:
-                out = keep_inside_composite(out, frame, edges)
+                out = keep_inside_composite(out, frame, edges, field)
             wr.stdin.write(out.astype(np.uint8).tobytes())
             frame_no += 1
             if tracker and frame_no % 5 == 0:
@@ -1686,118 +1704,484 @@ def flow_mesh(inputs, opts, tracker):
     return outs
 
 
+def _section(title):
+    print(f"\n{'-'*60}")
+    print(title)
+    print(f"{'-'*60}")
+
+
+def _parse_multi_paths(raw):
+    paths = []
+    current = ""
+    in_quotes = False
+    quote_char = None
+    for char in raw:
+        if char in ['"', "'"]:
+            if not in_quotes:
+                in_quotes = True
+                quote_char = char
+            elif char == quote_char:
+                in_quotes = False
+                quote_char = None
+            else:
+                current += char
+        elif char in [' ', '\t'] and not in_quotes:
+            if current.strip():
+                paths.append(current.strip())
+            current = ""
+        else:
+            current += char
+    if current.strip():
+        paths.append(current.strip())
+    return paths
+
+
+def _categorize(paths):
+    valid, not_exist, not_supported, invalid, all_files = [], [], [], [], []
+    for p in paths:
+        if not os.path.exists(p):
+            cleaned = p.strip()
+            if any(c.isalnum() for c in cleaned):
+                not_exist.append(p)
+            else:
+                invalid.append(p)
+            continue
+        if os.path.isdir(p):
+            files = collect_inputs([p], IMG_EXTS | VID_EXTS | AUD_EXTS | MESH_EXTS)
+            if files:
+                valid.append((p, files))
+                all_files.extend(files)
+            else:
+                not_supported.append(p)
+            continue
+        ext = os.path.splitext(p)[1].lower()
+        if ext in (IMG_EXTS | VID_EXTS | AUD_EXTS | MESH_EXTS):
+            valid.append((p, [p]))
+            all_files.append(p)
+        else:
+            not_supported.append(p)
+    return valid, not_exist, not_supported, invalid, all_files
+
+
+def _display_path_summary(valid, not_exist, not_supported, invalid, max_display=5):
+    if not (valid or not_exist or not_supported or invalid):
+        return
+    print(f"\n{'-'*60}")
+    print("INPUT PATH SUMMARY")
+    print(f"{'-'*60}")
+    if valid:
+        print(f"\n\u2713 VALID ({len(valid)}):")
+        for i, (orig, files) in enumerate(valid[:max_display]):
+            print(f"   {orig}" if len(files) == 1 else f"   {orig}/ ({len(files)} files)")
+        if len(valid) > max_display:
+            print(f"   ... +{len(valid) - max_display} more valid")
+    if not_exist:
+        print(f"\n\u2717 NOT FOUND ({len(not_exist)}):")
+        for p in not_exist[:max_display]:
+            print(f"   {p}")
+        if len(not_exist) > max_display:
+            print(f"   ... +{len(not_exist) - max_display} more not found")
+    if not_supported:
+        print(f"\n\u26a0 NOT SUPPORTED ({len(not_supported)}):")
+        for p in not_supported[:max_display]:
+            print(f"   {p}")
+        if len(not_supported) > max_display:
+            print(f"   ... +{len(not_supported) - max_display} more not supported")
+    if invalid:
+        print(f"\n? INVALID INPUT ({len(invalid)}):")
+        for p in invalid[:max_display]:
+            print(f"   {p}")
+        if len(invalid) > max_display:
+            print(f"   ... +{len(invalid) - max_display} more invalid")
+    if all_files:
+        print(f"\n\u2192 {len(all_files)} file(s) ready to process from {len(valid)} valid path(s)")
+    else:
+        print(f"\n\u2192 No valid files found to process")
+
+
+def ask_palette():
+    print("\nSelect palette:")
+    for i, name in enumerate(PALETTE_NAMES, 1):
+        print(f"  {i}. {name.capitalize()}")
+    while True:
+        choice = input(f"\nSelect palette (1-{len(PALETTE_NAMES)}, default 1): ").strip()
+        if choice == '' or choice == '1':
+            return 'electric'
+        if choice.isdigit() and 1 <= int(choice) <= len(PALETTE_NAMES):
+            return PALETTE_NAMES[int(choice) - 1]
+        if choice in PALETTE_NAMES:
+            return choice
+        print(f"Invalid choice '{choice}'. Please enter a number from 1 to {len(PALETTE_NAMES)}.")
+
+
+def ask_glow():
+    print("\nGlow intensity options:")
+    print("  1. Subtle (0.6)")
+    print("  2. Normal (1.0, default)")
+    print("  3. Strong (1.6)")
+    print("  4. Extreme (2.4)")
+    while True:
+        choice = input("\nSelect glow (1-4, default 2): ").strip()
+        if choice == '' or choice == '2':
+            return 1.0
+        if choice == '1':
+            return 0.6
+        if choice == '3':
+            return 1.6
+        if choice == '4':
+            return 2.4
+        print(f"Invalid choice '{choice}'. Please enter 1, 2, 3, or 4.")
+
+
+def ask_threshold():
+    print("\nEdge threshold options:")
+    print("  1. Sensitive - more edges, busier art (0.06)")
+    print("  2. Balanced (0.12, default)")
+    print("  3. Strict - only strong edges (0.22)")
+    while True:
+        choice = input("\nSelect threshold (1-3, default 2): ").strip()
+        if choice == '' or choice == '2':
+            return 0.12
+        if choice == '1':
+            return 0.06
+        if choice == '3':
+            return 0.22
+        print(f"Invalid choice '{choice}'. Please enter 1, 2, or 3.")
+
+
+def select_float(prompt, default, lo, hi):
+    while True:
+        raw = input(f"{prompt} [{lo:g}-{hi:g}] (Enter for {default:g}): ").strip()
+        if raw == '':
+            return default
+        try:
+            value = float(raw)
+            if lo <= value <= hi:
+                return value
+            print(f"Value must be between {lo:g} and {hi:g}.")
+        except ValueError:
+            print(f"Invalid number '{raw}'.")
+
+
+def _output_for_arg(inp, out_arg, tag, ext, next_to_input):
+    if not out_arg:
+        return _fallback_out(inp, tag, ext, {'next_to_input': next_to_input})
+    is_folder = out_arg.endswith('/') or out_arg.endswith('\\') or os.path.isdir(out_arg)
+    if not is_folder:
+        has_ext = bool(os.path.splitext(out_arg)[1])
+        if not has_ext and not os.path.exists(out_arg):
+            is_folder = True
+    if is_folder:
+        return os.path.join(out_arg, _out_default(inp, tag, ext))
+    return out_arg
+
+
+def _tag_and_ext_for(command, inp, opts):
+    ext = os.path.splitext(inp)[1].lower()
+    if command == 'audio':
+        return (opts.get('audio_profile') or 'slash'), '.wav'
+    if command == 'mesh':
+        return f"{opts['palette']}3d", ('.mp4' if opts.get('turntable') else '.png')
+    if ext in VID_EXTS:
+        return opts['palette'], '.mp4'
+    return opts['palette'], ext
+
+
+def _run_one(inp, outp, command, opts, tracker):
+    if command == 'neon':
+        if os.path.splitext(inp)[1].lower() in VID_EXTS:
+            path, _n = process_video_file(inp, outp, opts['palette'], opts['glow'],
+                                          opts['threshold'], opts.get('env', 1.0),
+                                          audio_profile=opts.get('audio_profile'),
+                                          spatial_glow=opts.get('spatial', True),
+                                          neon_audio=opts.get('neon_audio', False),
+                                          advanced_audio=opts.get('advanced_audio'),
+                                          tracker=tracker,
+                                          keep_inside=opts.get('keep_inside', False))
+            return path
+        path, _aux = neonize_image_file(inp, outp, opts['palette'], opts['glow'],
+                                        opts['threshold'], opts.get('env', 1.0), tracker,
+                                        keep_inside=opts.get('keep_inside', False))
+        return path
+    if command == 'audio':
+        return neonize_audio_file(inp, outp, opts.get('audio_profile') or 'slash',
+                                  opts['glow'], opts.get('advanced_audio'), tracker)
+    if command == 'mesh':
+        relief = os.path.splitext(inp)[1].lower() not in MESH_EXTS
+        if relief:
+            return neonize_relief_file(inp, outp, opts['palette'], opts['glow'],
+                                       opts.get('depth', 0.85), opts.get('turntable', 48),
+                                       opts.get('azimuth', 30.0), opts.get('elevation', 20.0),
+                                       tracker=tracker, export_mesh=opts.get('export_mesh', False))
+        return neonize_mesh_file(inp, outp, opts['palette'], opts['glow'],
+                                 opts.get('turntable', 0), opts.get('azimuth', 30.0),
+                                 opts.get('elevation', 20.0), tracker=tracker)
+    raise ValueError(f"unknown command: {command}")
+
+
+def _bar30(frac):
+    frac = max(0.0, min(1.0, frac))
+    filled = int(30 * frac)
+    return "\u2588" * filled + "\u2591" * (30 - filled)
+
+
+def _fmt_mmss(seconds):
+    return time.strftime('%M:%S', time.gmtime(max(0, int(seconds))))
+
+
+def process_pairs(pairs, command, file_type, opts):
+    """the old batch look: header, per-file bars, footer with completed/errors"""
+    if not pairs:
+        return []
+    total = len(pairs)
+    t0 = time.time()
+    processed = 0
+    errors = 0
+    outputs = []
+    print(f"\n{'='*60}")
+    print(f"Processing {total} {file_type}{'s' if total != 1 else ''} - Mode: {command}")
+    print(f"Palette: {opts['palette']} | Glow: {opts['glow']:g} | Threshold: {opts['threshold']:g}")
+    print(f"{'='*60}\n")
+    for idx, (inp, outp) in enumerate(pairs, 1):
+        disp = os.path.basename(inp)
+        if len(disp) > 25:
+            disp = disp[:22] + '...'
+        state = {'last': 0}
+        tr = StageTracker()
+        tr.quiet = True
+
+        def hook(label, frac, disp=disp, state=state, t_start=time.time()):
+            now = time.time() - t_start
+            if command == 'neon' and os.path.splitext(inp)[1].lower() in IMG_EXTS:
+                step = 2 if frac >= 0.5 else 1
+                line = (f"\r  {disp} [{_bar30(frac)}] {step}/2 ({frac*100:5.1f}%) - "
+                        f"{'Blooming...' if step == 2 else 'Detecting edges...'}")
+            else:
+                eta = now * (1.0 - frac) / frac if frac > 0.02 else 0.0
+                line = f"\r  {disp} [{_bar30(frac)}] {frac*100:5.1f}% - {label} ({_fmt_mmss(now)}<{_fmt_mmss(eta)})"
+            if len(line) < state['last']:
+                line += ' ' * (state['last'] - len(line))
+            state['last'] = len(line)
+            sys.stdout.write(line)
+            sys.stdout.flush()
+
+        tr.hook = hook
+        try:
+            path = _run_one(inp, outp, command, opts, tr)
+            done = f"\r  {disp} [{_bar30(1.0)}] 100.0% - Done!"
+            if len(done) < state['last']:
+                done += ' ' * (state['last'] - len(done))
+            sys.stdout.write(done + "\n")
+            sys.stdout.flush()
+            outputs.append(path)
+            processed += 1
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            if state['last']:
+                sys.stdout.write("\n")
+            msg = str(e)[:40]
+            print(f"  {NEON_DIM}Error: {msg}{NEON_RESET}")
+            errors += 1
+    print(f"\n{'='*60}")
+    print(f"Completed: {processed}/{total} {file_type}{'s' if total != 1 else ''}")
+    print(f"Total time: {_fmt_mmss(time.time() - t0)}")
+    if errors > 0:
+        print(f"Errors: {errors}")
+    print(f"{'='*60}")
+    return outputs
+
+
+def _command_for(inp):
+    ext = os.path.splitext(inp)[1].lower()
+    if ext in AUD_EXTS:
+        return 'audio'
+    if ext in MESH_EXTS:
+        return 'mesh'
+    return 'neon'
+
+
 def interactive_mode():
     print_banner()
-    ffmpeg_ok = check_env()
+    ff = shutil.which('ffmpeg')
+    print(f"{NEON_DIM}ffmpeg: {ff or 'NOT FOUND (video and audio need it \u2014 install ffmpeg)'}{NEON_RESET}")
     while True:
+        _section("INPUT SELECTION")
+        print("\nEnter input path(s) - separate multiple paths with spaces")
+        print("Images, videos, audio and meshes can be mixed freely")
+        print("Use quotes for paths with spaces, or 'q' to quit:")
         try:
-            raw = input("inputs (files or folders, comma separated) > ").strip()
+            raw = input("> ").strip()
         except EOFError:
             return 0
         if not raw:
+            print("Error: No input provided. Please enter at least one path or 'q' to quit.")
             continue
         if raw.lower() in ('q', 'quit', 'exit'):
+            print("\nExiting Neonify. Stay glowing!")
             return 0
-        parts = [p.strip().strip('"\'') for p in raw.split(',') if p.strip()]
-        imgs = collect_inputs(parts, IMG_EXTS)
-        vids = collect_inputs(parts, VID_EXTS)
-        auds = collect_inputs(parts, AUD_EXTS)
-        meshes = collect_inputs(parts, MESH_EXTS)
-        if not (imgs or vids or auds or meshes):
-            print(f"{NEON_DIM}no media files found{NEON_RESET}")
+        paths = _parse_multi_paths(raw)
+        if not paths:
+            print("Error: Could not parse any paths from input. Please try again.")
             continue
-        desc = _counts_desc(len(imgs), len(vids), len(auds), len(meshes))
-        print(f"{NEON_DIM}found: {desc}{NEON_RESET}")
-        _run_detected(imgs, vids, auds, meshes, ffmpeg_ok)
+        valid, not_exist, not_supported, invalid, all_files = _categorize(paths)
+        _display_path_summary(valid, not_exist, not_supported, invalid)
+        if not all_files:
+            print(f"\n{'-'*40}")
+            if not_exist or not_supported or invalid:
+                print("Options:")
+                print("  1. Enter different paths")
+                print("  2. Exit")
+                retry = input("\nSelect option (1 or 2): ").strip()
+                if retry != '1':
+                    print("\nExiting Neonify. Stay glowing!")
+                    return 0
+                continue
+            print("Please enter valid paths.")
+            continue
 
-
-def _counts_desc(ni, nv, na, nm):
-    parts = []
-    if ni:
-        parts.append(f"{ni} image" + ("s" if ni != 1 else ""))
-    if nv:
-        parts.append(f"{nv} video" + ("s" if nv != 1 else ""))
-    if na:
-        parts.append(f"{na} audio file" + ("s" if na != 1 else ""))
-    if nm:
-        parts.append(f"{nm} 3d mesh" + ("es" if nm != 1 else ""))
-    out = ""
-    for i, s in enumerate(parts):
-        if i:
-            out += " and " if i + 1 == len(parts) else ", "
-        out += s
-    return out
-
-
-def _ask_palette():
-    print(f"\n{NEON_BOLD}palette{NEON_RESET}")
-    for i, p in enumerate(PALETTE_NAMES, 1):
-        print(f"  {i}) {p}")
-    raw = input("  pick [1] > ").strip()
-    if raw.isdigit() and 1 <= int(raw) <= len(PALETTE_NAMES):
-        return PALETTE_NAMES[int(raw) - 1]
-    if raw in PALETTE_NAMES:
-        return raw
-    return 'electric'
-
-
-def _ask_float(label, default, lo, hi):
-    raw = input(f"  {label} [{default:g}] > ").strip()
-    if not raw:
-        return default
-    try:
-        v = float(raw)
-        return v if lo <= v <= hi else default
-    except ValueError:
-        return default
-
-
-def _run_detected(imgs, vids, auds, meshes, ffmpeg_ok):
-    opts = {'palette': _ask_palette(),
-            'glow': _ask_float('glow', 1.0, 0.1, 3.0),
-            'threshold': _ask_float('edge threshold', 0.12, 0.02, 0.5),
-            'env': _ask_float('ambient detail', 1.0, 0.0, 2.0)}
-    if imgs or vids:
-        opts['keep_inside'] = input(
-            "  keep the inside (original look inside the edges) [y/N] > ").strip().lower() == 'y'
-    if vids:
-        opts['spatial'] = input("  spatial glow (stereo \u2192 direction) [Y/n] > ").strip().lower() != 'n'
-        na = input("  neonify the audio too? [y/N] > ").strip().lower() == 'y'
-        opts['neon_audio'] = na
-        if na:
-            prof = ask_audio_profile()
-            opts['audio_profile'] = prof
-            if input("  advanced audio settings? [y/N] > ").strip().lower() == 'y':
-                opts['advanced_audio'] = ask_advanced_audio(prof)
-    if auds and not opts.get('neon_audio'):
-        prof = ask_audio_profile()
-        opts['audio_profile'] = prof
-        if input("  advanced audio settings? [y/N] > ").strip().lower() == 'y':
-            opts['advanced_audio'] = ask_advanced_audio(prof)
-    if meshes:
-        opts['turntable'] = int(_ask_float('turntable frames (0 = single image)', 48, 0, 600))
-        opts['azimuth'] = _ask_float('azimuth', 30.0, 0.0, 360.0)
-        opts['elevation'] = _ask_float('elevation', 20.0, -89.0, 89.0)
-        opts['depth'] = _ask_float('relief depth', 0.85, 0.1, 3.0)
-    tracker = StageTracker()
-    try:
-        if imgs:
-            flow_image(imgs, opts, tracker)
-        if vids:
-            if not ffmpeg_ok:
-                print(f"{NEON_DIM}ffmpeg missing \u2014 video needs it. install ffmpeg first.{NEON_RESET}")
+        images, videos, audios, meshes = [], [], [], []
+        for f in all_files:
+            ext = os.path.splitext(f)[1].lower()
+            if ext in IMG_EXTS:
+                images.append(f)
+            elif ext in VID_EXTS:
+                videos.append(f)
+            elif ext in AUD_EXTS:
+                audios.append(f)
             else:
-                flow_video(vids, opts, tracker)
-        if auds:
-            if not ffmpeg_ok:
-                print(f"{NEON_DIM}ffmpeg missing \u2014 audio needs it. install ffmpeg first.{NEON_RESET}")
-            else:
-                opts.setdefault('audio_profile', 'slash')
-                flow_audio(auds, opts, tracker)
+                meshes.append(f)
+        _section("FILES TO PROCESS")
+        print(f"  Images: {len(images)}")
+        print(f"  Videos: {len(videos)}")
+        print(f"  Audio:  {len(audios)}")
+        print(f"  Meshes: {len(meshes)}")
+
+        _section("SHARED SETTINGS")
+        opts = {'palette': ask_palette(),
+                'glow': ask_glow(),
+                'threshold': ask_threshold()}
+        opts['env'] = select_float("\nAmbient detail", 1.0, 0.0, 2.0)
+        if images or videos:
+            opts['keep_inside'] = input(
+                "\nKeep the original look under the effect (instead of edges only) [y/N]: ").strip().lower() == 'y'
+        if videos:
+            _section("VIDEO SETTINGS")
+            opts['spatial'] = input(
+                "\nSpatial glow (stereo \u2192 direction) [Y/n]: ").strip().lower() != 'n'
+            opts['neon_audio'] = input("\nNeonify the audio too? [y/N]: ").strip().lower() == 'y'
+            if opts['neon_audio']:
+                opts['audio_profile'] = ask_audio_profile(
+                    opts.get('audio_profile') or 'slash')
+                if input("\nAdvanced audio settings? [y/N]: ").strip().lower() == 'y':
+                    opts['advanced_audio'] = ask_advanced_audio(opts['audio_profile'])
+        if audios:
+            _section("AUDIO SETTINGS")
+            print("\nThe neon audio FX rework the track through the selected profile:")
+            print("  drive, echoes, reverb, pulse and shimmer, wide stage")
+            print("  intensity follows the Glow setting")
+            print("  output: <name>_neonify_<profile>_<timestamp>.wav (stereo)")
+            opts['audio_profile'] = ask_audio_profile(opts.get('audio_profile') or 'slash')
+            if input("\nAdvanced audio settings? [y/N]: ").strip().lower() == 'y':
+                opts['advanced_audio'] = ask_advanced_audio(opts['audio_profile'])
         if meshes:
-            flow_mesh(meshes, opts, tracker)
-    except Exception as e:
-        print(f"{NEON_PINK}error: {e}{NEON_RESET}")
+            _section("MESH SETTINGS")
+            print("\nMesh output type:")
+            print("  1. Single neon wireframe view (PNG, default)")
+            print("  2. Turntable orbit video (MP4)")
+            while True:
+                pick = input("\nSelect output type (1-2, default 1): ").strip()
+                if pick == '' or pick == '1':
+                    opts['turntable'] = 0
+                    break
+                if pick == '2':
+                    print("\nTurntable frames options:")
+                    print("  1. 60 frames (2s loop)")
+                    print("  2. 120 frames (4s loop, default)")
+                    print("  3. 240 frames (8s loop)")
+                    while True:
+                        fpick = input("\nSelect frames (1-3, default 2): ").strip()
+                        if fpick == '' or fpick == '2':
+                            opts['turntable'] = 120
+                            break
+                        if fpick == '1':
+                            opts['turntable'] = 60
+                            break
+                        if fpick == '3':
+                            opts['turntable'] = 240
+                            break
+                        print(f"Invalid choice '{fpick}'. Please enter 1, 2, or 3.")
+                    break
+                print(f"Invalid choice '{pick}'. Please enter 1 or 2.")
+            if opts.get('turntable', 0) == 0:
+                opts['azimuth'] = select_float("\nAzimuth angle", 30.0, -180.0, 180.0)
+                opts['elevation'] = select_float("Elevation angle", 20.0, -89.0, 89.0)
+
+        _section("OUTPUT SETTINGS")
+        print("\n  1. results folder (default)")
+        print("  2. next to each input")
+        while True:
+            pick = input("\nSelect output location (1-2, default 1): ").strip()
+            if pick == '' or pick == '1':
+                opts['next_to_input'] = False
+                break
+            if pick == '2':
+                opts['next_to_input'] = True
+                break
+            print(f"Invalid choice '{pick}'. Please enter 1 or 2.")
+        print("\nPress Enter for auto-default, or enter custom path.")
+        print("For folders: outputs to that folder with the auto name.")
+        print("For files: outputs exactly to that path.\n")
+        singles = [f for f in all_files if not os.path.isdir(f)]
+        custom_out = {}
+        for i, f in enumerate(singles, 1):
+            command = _command_for(f)
+            tag, ext = _tag_and_ext_for(command, f, opts)
+            auto_out = _fallback_out(f, tag, ext, opts)
+            print(f"[{i}/{len(singles)}] \"{os.path.basename(f)}\"")
+            print(f"  Auto: {auto_out}")
+            user_out = input("> ").strip()
+            if user_out:
+                custom_out[f] = _output_for_arg(f, user_out.strip('"\''), tag, ext,
+                                                opts.get('next_to_input', False))
+            else:
+                custom_out[f] = auto_out
+
+        groups = {'neon': [], 'audio': [], 'mesh': []}
+        for f in all_files:
+            command = _command_for(f)
+            if f in custom_out:
+                outp = custom_out[f]
+            else:
+                tag, ext = _tag_and_ext_for(command, f, opts)
+                outp = _fallback_out(f, tag, ext, opts)
+            groups[command].append((f, outp))
+
+        all_outputs = []
+        try:
+            all_outputs.extend(process_pairs(groups['neon'], 'neon', 'image/video', opts))
+            all_outputs.extend(process_pairs(groups['audio'], 'audio', 'audio', opts))
+            all_outputs.extend(process_pairs(groups['mesh'], 'mesh', 'mesh', opts))
+        except KeyboardInterrupt:
+            print(f"\n{NEON_DIM}interrupted{NEON_RESET}")
+            return 130
+
+        print(f"\n{'='*60}")
+        print("ALL PROCESSING COMPLETE!")
+        print(f"{'='*60}")
+        if all_outputs:
+            print("\nGenerated files:")
+            for outp in all_outputs:
+                print(f"  {outp}")
+        print("\nWhat would you like to do next?")
+        print("  1. Process again (start fresh)")
+        print("  2. Exit")
+        pick = input("\nSelect option (1 or 2): ").strip()
+        if pick == '1':
+            print("\nStarting fresh session...")
+            continue
+        print("\nExiting Neonify. Stay glowing!")
+        return 0
 
 
 def run_gui():
@@ -1909,9 +2293,10 @@ def main(argv=None):
 
     if not args.input:
         if args.command in ('image', 'video', 'audio', 'mesh', 'batch'):
-            print("no input given \u2014 entering interactive mode\n")
-            return interactive_mode()
-        print_banner()
+            print("Error: Input path required")
+            print("Usage: python neonify.py <command> <input> [-o output]")
+            print("\nCommands: image (images/videos), audio, mesh")
+            return 1
         return interactive_mode()
 
     if not cv2:
@@ -1947,24 +2332,53 @@ def main(argv=None):
     if not files:
         print("no valid input files found")
         return 1
+    for p in args.input:
+        if not os.path.exists(p):
+            print(f"Error: Input not found: {p}")
+            return 1
 
-    print_banner()
-    ffmpeg_ok = check_env()
+    ffmpeg_ok = shutil.which('ffmpeg') is not None
     if args.command in ('video', 'audio') and not ffmpeg_ok:
         print("ffmpeg required for video/audio. install it, then retry.")
         return 1
-    if args.command == 'video' and args.neon_audio and not args.profile:
+    if args.command in ('image', 'video', 'audio', 'mesh', 'batch'):
+        if not (0.1 <= args.glow <= 3.0):
+            print("Error: --glow must be between 0.1 and 3.0")
+            return 1
+        if not (0.02 <= args.threshold <= 0.5):
+            print("Error: --threshold must be between 0.02 and 0.5")
+            return 1
+        if args.turntable < 0:
+            print("Error: --turntable must be 0 (single view) or a positive frame count")
+            return 1
+    if args.command in ('video', 'batch') and args.neon_audio and not args.profile:
+        opts['audio_profile'] = 'slash'
+    if args.command in ('audio', 'batch') and not opts.get('audio_profile'):
         opts['audio_profile'] = 'slash'
 
+    def build_pairs(inputs, kinds, command):
+        pairs = []
+        for inp in collect_inputs(inputs, kinds):
+            tag, ext = _tag_and_ext_for(command, inp, opts)
+            pairs.append((inp, _output_for_arg(inp, opts.get('output') or '', tag, ext,
+                                               opts.get('next_to_input', False))))
+        return pairs
+
     tracker = StageTracker(json_mode=args.json_progress)
-    dispatch = {'image': flow_image, 'video': flow_video, 'audio': flow_audio,
-                'mesh': flow_mesh,
-                'batch': lambda i, o, t: (flow_image(collect_inputs(i, IMG_EXTS), o, t),
-                                          flow_video(collect_inputs(i, VID_EXTS), o, t) if ffmpeg_ok else None,
-                                          (opts.__setitem__('audio_profile', opts.get('audio_profile') or 'slash'),
-                                           flow_audio(collect_inputs(i, AUD_EXTS), o, t)) if ffmpeg_ok else None)}
     try:
-        dispatch[args.command](args.input, opts, tracker)
+        if args.command == 'batch':
+            process_pairs(build_pairs(args.input, IMG_EXTS, 'neon'), 'neon', 'image/video', opts)
+            if ffmpeg_ok:
+                process_pairs(build_pairs(args.input, VID_EXTS, 'neon'), 'neon', 'image/video', opts)
+                process_pairs(build_pairs(args.input, AUD_EXTS, 'audio'), 'audio', 'audio', opts)
+        elif args.command == 'image':
+            process_pairs(build_pairs(args.input, IMG_EXTS, 'neon'), 'neon', 'image/video', opts)
+        elif args.command == 'video':
+            process_pairs(build_pairs(args.input, VID_EXTS, 'neon'), 'neon', 'image/video', opts)
+        elif args.command == 'audio':
+            process_pairs(build_pairs(args.input, AUD_EXTS, 'audio'), 'audio', 'audio', opts)
+        elif args.command == 'mesh':
+            process_pairs(build_pairs(args.input, MESH_EXTS | IMG_EXTS, 'mesh'), 'mesh', 'mesh', opts)
     except KeyboardInterrupt:
         print(f"\n{NEON_DIM}interrupted{NEON_RESET}")
         return 130

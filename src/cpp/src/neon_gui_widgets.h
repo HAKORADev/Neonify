@@ -1,5 +1,8 @@
 // NEONIFY native gui — center widgets: fixed image canvas, video player,
 // waveforms, compares. previews render through ffmpeg, same as the engine.
+// audio playback is our own pcm engine (decode -> QAudioOutput): the playhead
+// comes from bytes written, so pause freezes exactly and 0.5x glides — no
+// system media backend involved, every ffmpeg-decodable format plays.
 #pragma once
 #include <QWidget>
 #include <QPainter>
@@ -22,13 +25,13 @@
 #include <QElapsedTimer>
 #include <QByteArray>
 #include <QDateTime>
+#include <QAudioOutput>
+#include <QAudioFormat>
 #include <cmath>
-#include <QMediaPlayer>
-#include <QMediaContent>
-#include <QUrl>
 #include <QFile>
 #include <condition_variable>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <atomic>
@@ -48,23 +51,47 @@ inline QColor C_LINE()    { return QColor(0x2a, 0x2a, 0x2a); }
 inline QColor C_TEXT()    { return QColor(0xe5, 0xe5, 0xe5); }
 inline QColor C_DIM()     { return QColor(0x66, 0x66, 0x66); }
 
+// ---------------------------------------------------------------- image decode
+// the engine reads images with opencv — the gui previews do the same, so the
+// gui can open exactly what the engine opens (jpg included, static qt has no
+// qjpeg plugin)
+inline QImage load_image_robust(const QString& path) {
+    std::vector<uint8_t> bytes = neon::read_file_bytes(path.toStdString());
+    if (bytes.empty()) return QImage();
+    cv::Mat img = cv::imdecode(bytes, cv::IMREAD_COLOR);
+    if (!img.empty()) {
+        QImage view(img.data, img.cols, img.rows, int(img.step), QImage::Format_BGR888);
+        QImage own = view.copy();
+        if (!own.isNull()) return own;
+    }
+    QImage via_qt = QImage::fromData(bytes.data(), int(bytes.size()));
+    return via_qt;
+}
+
 // ---------------------------------------------------------------- pcm decode
-// ffmpeg -> mono f32 @ 8000hz; empty byte array when ffmpeg or the file is missing
-inline QByteArray decode_pcm_bytes(const QString& path) {
+// s16le interleaved at an arbitrary rate/channels for the playback engine,
+// mono f32 @ 8000hz for the waveform. empty byte array when ffmpeg or the
+// file is missing
+inline QByteArray decode_pcm_bytes(const QString& path, int sr, int ch, const char* fmt) {
     QByteArray all;
     if (!QFile::exists(path)) return all;
     neon::Proc p;
     if (!p.spawn({"ffmpeg", "-v", "error", "-i", path.toUtf8().constData(),
-                  "-ac", "1", "-ar", "8000", "-f", "f32le", "-"}, true, false))
+                  "-ac", std::to_string(ch), "-ar", std::to_string(sr), "-f", fmt, "-"},
+                 true, false))
         return all;
     char buf[65536];
     size_t n;
     while ((n = std::fread(buf, 1, sizeof(buf), p.out)) > 0) {
         all.append(buf, int(n));
-        if (all.size() > 128 * 1024 * 1024) break;
+        if (all.size() > 192 * 1024 * 1024) break;
     }
     p.wait_close();
     return all;
+}
+
+inline QByteArray decode_wave_pcm(const QString& path) {
+    return decode_pcm_bytes(path, 8000, 1, "f32le");
 }
 
 inline void pcm_envelope(const std::vector<float>& pcm, int columns,
@@ -94,9 +121,221 @@ inline std::vector<float> bytes_to_pcm(const QByteArray& all) {
     return std::vector<float>(f, f + n);
 }
 
+// ---------------------------------------------------------------- playback engine
+// s16 stereo 44100 decoded once in the background; playback goes through
+// QAudioOutput push mode. the playhead is derived from processedUSecs, so it
+// never lags, never jumps back on pause, and speed changes re-base cleanly.
+class AudioEngine : public QObject {
+    Q_OBJECT
+
+public:
+    explicit AudioEngine(QObject* parent = nullptr) : QObject(parent) {
+        feed = new QTimer(this);
+        feed->setInterval(25);
+        feed->setTimerType(Qt::PreciseTimer);
+        connect(feed, &QTimer::timeout, this, &AudioEngine::pump);
+    }
+
+    ~AudioEngine() override {
+        alive = false;
+        if (dec.joinable()) dec.join();
+        teardown_output();
+    }
+
+    AudioEngine(const AudioEngine&) = delete;
+    AudioEngine& operator=(const AudioEngine&) = delete;
+
+    qint64 duration_ms() const { return dur_ms; }
+    bool ready() const { return have_pcm; }
+    QString error() const { return err; }
+
+    void load(const QString& path) {
+        stop();
+        have_pcm = false;
+        dur_ms = 0;
+        err.clear();
+        alive = true;
+        load_gen++;
+        uint64_t gen = load_gen;
+        if (dec.joinable()) dec.join();
+        dec = std::thread([this, path, gen] {
+            QByteArray pcm = decode_pcm_bytes(path, 44100, 2, "s16le");
+            if (!alive) return;
+            QMetaObject::invokeMethod(this, [this, pcm, gen] {
+                if (gen != load_gen || pcm.isEmpty()) {
+                    if (gen == load_gen && pcm.isEmpty()) {
+                        err = QStringLiteral("cannot decode this file (ffmpeg needed)");
+                        emit failed(err);
+                    }
+                    return;
+                }
+                src = pcm;
+                cache.clear();
+                have_pcm = true;
+                dur_ms = qint64(double(src.size() / 4) / 44100.0 * 1000.0);
+                emit decoded();
+            }, Qt::QueuedConnection);
+        });
+    }
+
+    void play() {
+        if (!have_pcm || playing) return;
+        if (pos_ms() >= dur_ms - 30) base_ms = 0;
+        start_output(base_ms);
+        playing = true;
+        emit stateChanged();
+    }
+
+    void pause() {
+        if (!playing) return;
+        base_ms = pos_ms();
+        if (out) out->suspend();
+        playing = false;
+        emit stateChanged();
+    }
+
+    void toggle() { playing ? pause() : play(); }
+
+    void stop() {
+        teardown_output();
+        playing = false;
+        base_ms = 0;
+        emit stateChanged();
+    }
+
+    void seek_ms(qint64 ms) {
+        bool was = playing;
+        base_ms = std::max<qint64>(0, std::min(ms, dur_ms));
+        if (was) start_output(base_ms);
+        else if (out) teardown_output();
+    }
+
+    void set_speed(double s) {
+        if (s == speed) return;
+        double at = playing ? pos_ms() : base_ms;
+        speed = s;
+        if (playing) start_output(at);
+    }
+
+    qint64 pos_ms() const {
+        if (!have_pcm) return base_ms;
+        if (!playing || !out) return base_ms;
+        double dev_us = double(out->processedUSecs());
+        double media = base_ms + (dev_us - base_us) / 1000.0 / speed;
+        return qint64(std::min(media, double(dur_ms)));
+    }
+
+signals:
+    void decoded();
+    void failed(const QString& msg);
+    void stateChanged();
+    void finished();
+
+private slots:
+    void pump() {
+        if (!out || !playing || !have_pcm) return;
+        const QByteArray& buf = buffer_for(speed);
+        qint64 dur_us = qint64(double(dur_ms) * 1000.0 * speed);
+        int free_b = out->bytesFree();
+        while (free_b > 0 && fed_us < dur_us) {
+            qint64 byte_at = qint64(double(fed_us) / 1e6 * 44100.0 * speed) * 4;
+            if (byte_at >= buf.size()) break;
+            int chunk = int(std::min<qint64>(std::min<qint64>(free_b, 16384), buf.size() - byte_at));
+            qint64 wrote = out->write(buf.constData() + byte_at, chunk);
+            if (wrote <= 0) break;
+            fed_us += qint64(double(wrote / 4) / (44100.0 * speed) * 1e6);
+            free_b -= int(wrote);
+        }
+        if (fed_us >= dur_us && out->processedUSecs() >= dur_us + 60000) {
+            base_ms = dur_ms;
+            pause();
+            emit finished();
+        }
+    }
+
+private:
+    const QByteArray& buffer_for(double s) {
+        auto it = cache.find(s);
+        if (it != cache.end()) return it->second;
+        if (s == 1.0) return cache.emplace(s, src).first->second;
+        const int16_t* in = reinterpret_cast<const int16_t*>(src.constData());
+        size_t frames_in = size_t(src.size()) / 4;
+        size_t frames_out = size_t(double(frames_in) * s);
+        QByteArray resampled;
+        resampled.resize(int(frames_out * 4));
+        int16_t* o = reinterpret_cast<int16_t*>(resampled.data());
+        for (size_t i = 0; i < frames_out; i++) {
+            double t = double(i) / s;
+            size_t i0 = size_t(t);
+            size_t i1 = std::min(i0 + 1, frames_in - 1);
+            double f = t - double(i0);
+            for (int c = 0; c < 2; c++) {
+                double a = double(in[i0 * 2 + c]);
+                double b = double(in[i1 * 2 + c]);
+                double v = a + (b - a) * f;
+                o[i * 2 + c] = int16_t(std::max(-32768.0, std::min(32767.0, v)));
+            }
+        }
+        return cache.emplace(s, resampled).first->second;
+    }
+
+    void teardown_output() {
+        if (feed) feed->stop();
+        if (out) {
+            out->stop();
+            delete out;
+            out = nullptr;
+        }
+        base_us = 0;
+        fed_us = 0;
+    }
+
+    void start_output(qint64 from_ms) {
+        teardown_output();
+        if (!have_pcm) return;
+        QAudioFormat fmt;
+        fmt.setSampleRate(44100);
+        fmt.setChannelCount(2);
+        fmt.setSampleSize(16);
+        fmt.setCodec("audio/pcm");
+        fmt.setByteOrder(QAudioFormat::LittleEndian);
+        fmt.setSampleType(QAudioFormat::SignedInt);
+        out = new QAudioOutput(fmt, this);
+        out->setBufferSize(44100 * 4);
+        base_us = 0;
+        fed_us = qint64(double(from_ms) / 1000.0 * 1000.0 * speed);
+        base_ms = from_ms;
+        out->start();
+        buffer_for(speed);
+        playing = true;
+        feed->start();
+    }
+
+public:
+    bool is_playing() const { return playing; }
+
+private:
+    QTimer* feed = nullptr;
+    QAudioOutput* out = nullptr;
+    QByteArray src;
+    std::map<double, QByteArray> cache;
+    std::thread dec;
+    std::atomic<bool> alive{false};
+    uint64_t load_gen = 0;
+    bool have_pcm = false;
+    bool playing = false;
+    double speed = 1.0;
+    qint64 dur_ms = 0;
+    qint64 base_ms = 0;
+    qint64 base_us = 0;
+    qint64 fed_us = 0;
+    QString err;
+};
+
 // ---------------------------------------------------------------- waveform
 // envelope is computed at a fixed column count so the shape never depends on
-// when the widget was laid out (the first-show glitch)
+// when the widget was laid out (the first-show glitch). the playhead is drawn
+// with subpixel antialiasing at 60fps for a buttery slide.
 class WaveformWidget : public QWidget {
 public:
     static constexpr int ENV_COLS = 2048;
@@ -128,6 +367,7 @@ public:
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
         p.fillRect(rect(), QColor(0x0a, 0x0a, 0x0a));
         if (!message.isEmpty()) {
             p.setPen(C_DIM());
@@ -148,10 +388,11 @@ protected:
             if (y1 < y0) std::swap(y0, y1);
             p.drawLine(x, y0, x, std::max(y1, y0 + 1));
         }
-        int px = int(pos_frac * double(w));
+        double px = pos_frac * double(w);
+        p.setPen(Qt::NoPen);
+        p.fillRect(QRectF(px - 1.0, 0, 2.0, h), QColor(0xff, 0xff, 0xff, 40));
         p.setPen(QPen(QColor(0xff, 0xff, 0xff), 1));
-        p.drawLine(px, 0, px, h);
-        p.fillRect(px - 1, 0, 3, h, QColor(0xff, 0xff, 0xff, 40));
+        p.drawLine(QLineF(px, 0, px, h));
     }
 };
 
@@ -289,6 +530,11 @@ signals:
     void decode_failed(const QString& msg);
 
 public slots:
+    void play_pause_slot() {
+        if (playing) pause();
+        else play();
+    }
+
     void advance() {
         if (!playing || !ok) return;
         QImage next;
@@ -310,7 +556,6 @@ public slots:
         cv_full.notify_all();
         update();
         emit state_changed();
-        if (reached_end) emit state_changed();
     }
 
 protected:
@@ -453,24 +698,108 @@ private:
     }
 };
 
+static QString fmt_clock(qint64 ms) {
+    int s = int(ms / 1000);
+    return QString("%1:%2").arg(s / 60).arg(s % 60, 2, 10, QChar('0'));
+}
+
+// ---------------------------------------------------------------- video page
+// canvas + real controls: play, seek with live time, speed, full duration
+class VideoPlayerPage : public QWidget {
+    Q_OBJECT
+
+public:
+    VideoCanvas* canvas = nullptr;
+    QPushButton* play_btn = nullptr;
+    QSlider* seek = nullptr;
+    QComboBox* speed_combo = nullptr;
+    QLabel* time_lbl = nullptr;
+    bool user_seeking = false;
+
+    VideoPlayerPage(QWidget* parent = nullptr) : QWidget(parent) {
+        QVBoxLayout* l = new QVBoxLayout(this);
+        l->setContentsMargins(0, 0, 0, 0);
+        l->setSpacing(2);
+        canvas = new VideoCanvas(this);
+        l->addWidget(canvas, 1);
+        QHBoxLayout* ctrl = new QHBoxLayout;
+        ctrl->setContentsMargins(8, 2, 8, 4);
+        play_btn = new QPushButton("Play", this);
+        seek = new QSlider(Qt::Horizontal, this);
+        seek->setRange(0, 0);
+        speed_combo = new QComboBox(this);
+        for (double s : {0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0})
+            speed_combo->addItem(QString::number(s, 'f', 2) + "x", s);
+        speed_combo->setCurrentIndex(3);
+        time_lbl = new QLabel("0:00 / 0:00", this);
+        time_lbl->setStyleSheet("color:#888888;font-size:11px;");
+        ctrl->addWidget(play_btn);
+        ctrl->addWidget(seek, 1);
+        ctrl->addWidget(new QLabel("speed", this));
+        ctrl->addWidget(speed_combo);
+        ctrl->addWidget(time_lbl);
+        l->addLayout(ctrl);
+
+        connect(play_btn, &QPushButton::clicked, canvas, &VideoCanvas::play_pause_slot);
+        connect(canvas, &VideoCanvas::state_changed, this, &VideoPlayerPage::sync_ui);
+        connect(speed_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this] {
+            canvas->set_speed(speed_combo->currentData().toDouble());
+        });
+        connect(seek, &QSlider::sliderPressed, this, [this] { user_seeking = true; });
+        connect(seek, &QSlider::sliderMoved, this, [this](int v) {
+            time_lbl->setText(QString("%1 / %2").arg(fmt_clock(v))
+                                  .arg(fmt_clock(std::max<qint64>(0, canvas->total_ms()))));
+            double f = canvas->total_ms() > 0 ? double(v) / double(canvas->total_ms()) : 0.0;
+            (void)f;
+        });
+        connect(seek, &QSlider::sliderReleased, this, [this] {
+            user_seeking = false;
+            canvas->seek_ms(seek->value());
+        });
+        QTimer* poll = new QTimer(this);
+        poll->setInterval(33);
+        connect(poll, &QTimer::timeout, this, &VideoPlayerPage::sync_ui);
+        poll->start();
+    }
+
+    void sync_ui() {
+        if (user_seeking) {
+            play_btn->setText(canvas->playing ? "Pause" : "Play");
+            return;
+        }
+        qint64 pos = canvas->position_ms();
+        qint64 total = std::max<qint64>(0, canvas->total_ms());
+        seek->blockSignals(true);
+        seek->setRange(0, int(total));
+        seek->setValue(int(std::min(pos, total)));
+        seek->blockSignals(false);
+        time_lbl->setText(QString("%1 / %2").arg(fmt_clock(pos)).arg(fmt_clock(total)));
+        play_btn->setText(canvas->playing ? "Pause" : "Play");
+    }
+
+    void load(const QString& path) {
+        canvas->load(path);
+        sync_ui();
+    }
+    void play() { canvas->play(); }
+    void pause() { canvas->pause(); }
+    void stop() { canvas->stop(); }
+};
+
 // ---------------------------------------------------------------- audio page
-// waveform + play/pause + seek + speed; decode runs off the ui thread
+// waveform + play/pause + seek + speed through the pcm engine
 class AudioWavePage : public QWidget {
+    Q_OBJECT
+
 public:
     WaveformWidget* wave = nullptr;
     QPushButton* play_btn = nullptr;
     QSlider* seek = nullptr;
     QComboBox* speed_combo = nullptr;
     QLabel* time_lbl = nullptr;
-    QMediaPlayer* player = nullptr;
+    AudioEngine* engine = nullptr;
     QString current;
-    qint64 dur = 0;
-    qint64 last_pos = 0;
-    QElapsedTimer last_pos_t;
     bool user_seek = false;
-    std::thread dec_thread;
-    std::atomic<bool> dec_alive{false};
-    uint64_t load_gen = 0;
 
     AudioWavePage(QWidget* parent = nullptr) : QWidget(parent) {
         QVBoxLayout* l = new QVBoxLayout(this);
@@ -483,9 +812,9 @@ public:
         seek = new QSlider(Qt::Horizontal, this);
         seek->setRange(0, 0);
         speed_combo = new QComboBox(this);
-        for (double s : {0.5, 0.75, 1.0, 1.25, 1.5, 2.0})
+        for (double s : {0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0})
             speed_combo->addItem(QString::number(s, 'f', 2) + "x", s);
-        speed_combo->setCurrentIndex(2);
+        speed_combo->setCurrentIndex(3);
         time_lbl = new QLabel("0:00 / 0:00", this);
         time_lbl->setStyleSheet("color:#666666;font-size:11px;");
         ctrl->addWidget(play_btn);
@@ -495,126 +824,106 @@ public:
         ctrl->addWidget(time_lbl);
         l->addLayout(ctrl);
 
-        player = new QMediaPlayer(this);
-        connect(play_btn, &QPushButton::clicked, this, [this] {
-            if (current.isEmpty()) return;
-            if (player->state() == QMediaPlayer::PlayingState) player->pause();
-            else player->play();
+        engine = new AudioEngine(this);
+        connect(play_btn, &QPushButton::clicked, engine, &AudioEngine::toggle);
+        connect(engine, &AudioEngine::stateChanged, this, [this] {
+            play_btn->setText(engine->is_playing() ? "Pause" : "Play");
+        });
+        connect(engine, &AudioEngine::decoded, this, [this] {
+            wave->message.clear();
+            seek->setRange(0, int(engine->duration_ms()));
+            play_btn->setEnabled(true);
+        });
+        connect(engine, &AudioEngine::failed, this, [this](const QString& m) {
+            wave->message = m;
+            wave->update();
+            play_btn->setEnabled(false);
         });
         connect(speed_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this] {
-            player->setPlaybackRate(speed_combo->currentData().toDouble());
-        });
-        connect(player, &QMediaPlayer::stateChanged, this, [this](QMediaPlayer::State s) {
-            play_btn->setText(s == QMediaPlayer::PlayingState ? "Pause" : "Play");
-        });
-        connect(player, QOverload<QMediaPlayer::Error>::of(&QMediaPlayer::error), this, [this](QMediaPlayer::Error) {
-            play_btn->setEnabled(false);
-            wave->message = QStringLiteral("playback unavailable (%1)").arg(player->errorString());
-            wave->update();
-        });
-        connect(player, &QMediaPlayer::durationChanged, this, [this](qint64 d) {
-            dur = d;
-            seek->setRange(0, int(d));
-            refresh_time(last_pos);
-        });
-        connect(player, &QMediaPlayer::positionChanged, this, [this](qint64 ms) {
-            last_pos = ms;
-            last_pos_t.restart();
-            double f = dur > 0 ? double(ms) / double(dur) : 0.0;
-            wave->set_pos(f);
-            if (!user_seek) seek->setValue(int(ms));
-            refresh_time(ms);
+            engine->set_speed(speed_combo->currentData().toDouble());
         });
         connect(seek, &QSlider::sliderPressed, this, [this] { user_seek = true; });
         connect(seek, &QSlider::sliderMoved, this, [this](int v) {
-            refresh_time(v);
-            double f = dur > 0 ? double(v) / double(dur) : 0.0;
+            time_lbl->setText(QString("%1 / %2").arg(fmt_clock(v))
+                                  .arg(fmt_clock(std::max<qint64>(0, engine->duration_ms()))));
+            double f = engine->duration_ms() > 0 ? double(v) / double(engine->duration_ms()) : 0.0;
             wave->set_pos(f);
         });
         connect(seek, &QSlider::sliderReleased, this, [this] {
             user_seek = false;
-            player->setPosition(seek->value());
-            last_pos = seek->value();
-            last_pos_t.restart();
+            engine->seek_ms(seek->value());
         });
-        smooth = new QTimer(this);
-        smooth->setInterval(33);
+        QTimer* smooth = new QTimer(this);
+        smooth->setInterval(16);
+        smooth->setTimerType(Qt::PreciseTimer);
         smooth->start();
         connect(smooth, &QTimer::timeout, this, [this] {
-            if (user_seek || player->state() != QMediaPlayer::PlayingState) return;
-            double rate = std::max(0.1, speed_combo->currentData().toDouble());
-            qint64 est = last_pos + qint64(double(last_pos_t.elapsed()) * rate);
-            if (dur > 0 && est > dur) est = dur;
-            double f = dur > 0 ? double(est) / double(dur) : 0.0;
+            if (user_seek || !engine->ready()) return;
+            qint64 pos = engine->pos_ms();
+            qint64 dur = engine->duration_ms();
+            double f = dur > 0 ? double(pos) / double(dur) : 0.0;
             wave->set_pos(f);
-            seek->blockSignals(true);
-            seek->setValue(int(est));
-            seek->blockSignals(false);
-            refresh_time(est);
+            if (!user_seek) {
+                seek->blockSignals(true);
+                seek->setValue(int(std::min<qint64>(pos, dur)));
+                seek->blockSignals(false);
+            }
+            time_lbl->setText(QString("%1 / %2").arg(fmt_clock(pos)).arg(fmt_clock(dur)));
         });
-    }
-
-    ~AudioWavePage() override {
-        dec_alive = false;
-        if (dec_thread.joinable()) dec_thread.join();
-    }
-
-    static QString fmt(qint64 ms) {
-        int s = int(ms / 1000);
-        return QString("%1:%2").arg(s / 60).arg(s % 60, 2, 10, QChar('0'));
     }
 
     void refresh_time(qint64 ms) {
-        time_lbl->setText(QString("%1 / %2").arg(fmt(ms)).arg(fmt(std::max<qint64>(0, dur))));
+        time_lbl->setText(QString("%1 / %2").arg(fmt_clock(ms))
+                              .arg(fmt_clock(std::max<qint64>(0, engine->duration_ms()))));
     }
 
     void load(const QString& path) {
-        stop();
         current = path;
         wave->set_pcm(std::vector<float>());
         wave->message = QStringLiteral("decoding\xe2\x80\xa6");
         wave->update();
-        play_btn->setEnabled(true);
-        player->setMedia(QMediaContent(QUrl::fromLocalFile(path)));
-        dur = 0;
-        last_pos = 0;
+        play_btn->setEnabled(false);
         seek->setRange(0, 0);
         refresh_time(0);
-        dec_alive = true;
-        load_gen++;
-        uint64_t gen = load_gen;
-        if (dec_thread.joinable()) dec_thread.join();
-        dec_thread = std::thread([this, path, gen] {
-            QByteArray pcm = decode_pcm_bytes(path);
-            std::vector<float> v = bytes_to_pcm(pcm);
-            QMetaObject::invokeMethod(this, [this, v, gen] {
-                if (gen != load_gen) return;
-                wave->set_pcm(v);
+        engine->load(path);
+        if (wave_dec.joinable()) wave_dec.join();
+        wave_dec = std::thread([this, path] {
+            QByteArray wave_pcm = decode_wave_pcm(path);
+            if (!wave_alive) return;
+            QMetaObject::invokeMethod(this, [this, wave_pcm] {
+                wave->set_pcm(bytes_to_pcm(wave_pcm));
             }, Qt::QueuedConnection);
         });
     }
 
     void stop() {
-        if (player) player->stop();
+        engine->stop();
         play_btn->setText("Play");
     }
 
 private:
-    QTimer* smooth = nullptr;
+    std::thread wave_dec;
+    std::atomic<bool> wave_alive{true};
+
+public:
+    ~AudioWavePage() override {
+        wave_alive = false;
+        if (wave_dec.joinable()) wave_dec.join();
+    }
 };
 
 // ---------------------------------------------------------------- single viewer
 class SingleViewer : public QStackedWidget {
 public:
     ImageCanvas* canvas = nullptr;
-    VideoCanvas* video = nullptr;
+    VideoPlayerPage* video = nullptr;
     AudioWavePage* audio_page = nullptr;
     QLabel* text_label = nullptr;
 
     SingleViewer(QWidget* parent = nullptr) : QStackedWidget(parent) {
         canvas = new ImageCanvas(this);
         addWidget(canvas);
-        video = new VideoCanvas(this);
+        video = new VideoPlayerPage(this);
         addWidget(video);
         audio_page = new AudioWavePage(this);
         addWidget(audio_page);
@@ -736,9 +1045,9 @@ public:
         seek = new QSlider(Qt::Horizontal);
         seek->setRange(0, 0);
         speed_combo = new QComboBox;
-        for (double s : {0.5, 0.75, 1.0, 1.25, 1.5, 2.0})
+        for (double s : {0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0})
             speed_combo->addItem(QString::number(s, 'f', 2) + "x", s);
-        speed_combo->setCurrentIndex(2);
+        speed_combo->setCurrentIndex(3);
         time_lbl = new QLabel("0:00 / 0:00");
         time_lbl->setStyleSheet("color:#888888;font-size:11px;");
         ctrl->addWidget(play_btn);
@@ -768,8 +1077,8 @@ public:
         }
         connect(seek, &QSlider::sliderPressed, this, [this] { user_seeking = true; });
         connect(seek, &QSlider::sliderMoved, this, [this](int v) {
-            time_lbl->setText(QString("%1 / %2").arg(AudioWavePage::fmt(v))
-                                  .arg(AudioWavePage::fmt(std::max<qint64>(0, cv[0]->total_ms()))));
+            time_lbl->setText(QString("%1 / %2").arg(fmt_clock(v))
+                                  .arg(fmt_clock(std::max<qint64>(0, cv[0]->total_ms()))));
         });
         connect(seek, &QSlider::sliderReleased, this, [this] {
             user_seeking = false;
@@ -791,8 +1100,8 @@ public:
         seek->setRange(0, int(std::max<qint64>(0, total)));
         seek->setValue(int(pos));
         seek->blockSignals(false);
-        time_lbl->setText(QString("%1 / %2").arg(AudioWavePage::fmt(pos))
-                              .arg(AudioWavePage::fmt(std::max<qint64>(0, total))));
+        time_lbl->setText(QString("%1 / %2").arg(fmt_clock(pos))
+                              .arg(fmt_clock(std::max<qint64>(0, total))));
         play_btn->setText((cv[0]->playing || cv[1]->playing) ? "Pause" : "Play");
     }
 
@@ -816,12 +1125,11 @@ public:
 class AudioCompare : public QWidget {
 public:
     WaveformWidget* wave[2] = {nullptr, nullptr};
-    QMediaPlayer* pl[2] = {nullptr, nullptr};
     QSlider* seek = nullptr;
     QPushButton* play_btn = nullptr;
     QLabel* names[2] = {nullptr, nullptr};
     QLabel* pos_lbl[2] = {nullptr, nullptr};
-    qint64 duration = 0;
+    AudioEngine* eng[2] = {nullptr, nullptr};
     bool user_seeking = false;
 
     AudioCompare(QWidget* parent = nullptr) : QWidget(parent) {
@@ -833,7 +1141,7 @@ public:
             names[i] = new QLabel(i == 0 ? QStringLiteral("original") : QStringLiteral("result"), this);
             names[i]->setStyleSheet("color:#e5e5e5;font-size:11px;");
             wave[i] = new WaveformWidget(this);
-            pos_lbl[i] = new QLabel("0:00", this);
+            pos_lbl[i] = new QLabel("0:00 / 0:00", this);
             pos_lbl[i]->setStyleSheet("color:#666666;font-size:11px;");
             side->addWidget(names[i]);
             side->addWidget(wave[i], 1);
@@ -849,87 +1157,89 @@ public:
         root->addLayout(ctrl);
 
         for (int i = 0; i < 2; i++) {
-            pl[i] = new QMediaPlayer(this);
-            connect(pl[i], &QMediaPlayer::durationChanged, this, [this](qint64 d) {
-                duration = d;
-                seek->setRange(0, int(d));
+            eng[i] = new AudioEngine(this);
+            connect(eng[i], &AudioEngine::decoded, this, [this] {
+                qint64 d = std::max(eng[0]->duration_ms(), eng[1]->duration_ms());
+                if (d > 0) seek->setRange(0, int(d));
             });
-            connect(pl[i], QOverload<QMediaPlayer::Error>::of(&QMediaPlayer::error), this, [this, i](QMediaPlayer::Error) {
-                wave[i]->message = QStringLiteral("playback unavailable (%1)").arg(pl[i]->errorString());
+            connect(eng[i], &AudioEngine::failed, this, [this, i](const QString& m) {
+                wave[i]->message = m;
                 wave[i]->update();
             });
         }
         connect(play_btn, &QPushButton::clicked, this, [this] {
-            if (pl[0]->state() == QMediaPlayer::PlayingState) { pl[0]->pause(); pl[1]->pause(); }
-            else { pl[0]->play(); pl[1]->play(); }
-        });
-        connect(pl[0], &QMediaPlayer::positionChanged, this, [this](qint64 pos) {
-            if (!user_seeking) seek->setValue(int(pos));
-            if (qAbs(pl[1]->position() - pos) > 120) pl[1]->setPosition(pos);
-            pos_lbl[0]->setText(QString("%1 / %2").arg(AudioWavePage::fmt(pos))
-                                    .arg(AudioWavePage::fmt(std::max<qint64>(0, duration))));
-            double f = duration > 0 ? double(pos) / double(duration) : 0.0;
-            wave[0]->set_pos(f);
-            wave[1]->set_pos(f);
-        });
-        connect(pl[1], &QMediaPlayer::positionChanged, this, [this](qint64 pos) {
-            pos_lbl[1]->setText(AudioWavePage::fmt(pos));
+            bool any = eng[0]->is_playing() || eng[1]->is_playing();
+            if (any) { eng[0]->pause(); eng[1]->pause(); }
+            else { eng[0]->play(); eng[1]->play(); }
         });
         connect(seek, &QSlider::sliderPressed, this, [this] { user_seeking = true; });
         connect(seek, &QSlider::sliderMoved, this, [this](int v) {
-            pos_lbl[0]->setText(QString("%1 / %2").arg(AudioWavePage::fmt(v))
-                                    .arg(AudioWavePage::fmt(std::max<qint64>(0, duration))));
+            pos_lbl[0]->setText(QString("%1 / %2").arg(fmt_clock(v))
+                                    .arg(fmt_clock(std::max<qint64>(0, seek->maximum()))));
         });
         connect(seek, &QSlider::sliderReleased, this, [this] {
             user_seeking = false;
-            pl[0]->setPosition(seek->value());
-            pl[1]->setPosition(seek->value());
+            eng[0]->seek_ms(seek->value());
+            eng[1]->seek_ms(seek->value());
+        });
+        QTimer* smooth = new QTimer(this);
+        smooth->setInterval(16);
+        smooth->setTimerType(Qt::PreciseTimer);
+        smooth->start();
+        connect(smooth, &QTimer::timeout, this, [this] {
+            if (user_seeking) return;
+            qint64 pos = std::max(eng[0]->pos_ms(), eng[1]->pos_ms());
+            qint64 dur = std::max(eng[0]->duration_ms(), eng[1]->duration_ms());
+            seek->blockSignals(true);
+            seek->setValue(int(std::min<qint64>(pos, dur)));
+            seek->blockSignals(false);
+            double f = dur > 0 ? double(pos) / double(dur) : 0.0;
+            wave[0]->set_pos(f);
+            wave[1]->set_pos(f);
+            pos_lbl[0]->setText(QString("%1 / %2").arg(fmt_clock(pos)).arg(fmt_clock(dur)));
+            pos_lbl[1]->setText(QString("%1 / %2").arg(fmt_clock(pos)).arg(fmt_clock(dur)));
+            play_btn->setText((eng[0]->is_playing() || eng[1]->is_playing()) ? "Pause" : "Play");
         });
     }
 
     void load(const QString& a, const QString& b) {
         stop_all();
-        wave[0]->message = QStringLiteral("decoding\xe2\x80\xa6");
-        wave[0]->update();
-        wave[1]->message = QStringLiteral("decoding\xe2\x80\xa6");
-        wave[1]->update();
-        pl[0]->setMedia(QMediaContent(QUrl::fromLocalFile(a)));
-        pl[1]->setMedia(QMediaContent(QUrl::fromLocalFile(b)));
+        for (int i = 0; i < 2; i++) {
+            wave[i]->message = QStringLiteral("decoding\xe2\x80\xa6");
+            wave[i]->update();
+        }
         names[0]->setText(QFileInfo(a).fileName());
         names[1]->setText(QFileInfo(b).fileName());
         seek->setValue(0);
-        alive = true;
-        load_gen++;
-        uint64_t gen = load_gen;
-        QByteArray pa = a.toUtf8(), pb = b.toUtf8();
-        if (dec_thread.joinable()) dec_thread.join();
-        dec_thread = std::thread([this, pa, pb, gen] {
-            QByteArray ra = decode_pcm_bytes(QString::fromUtf8(pa));
-            QByteArray rb = decode_pcm_bytes(QString::fromUtf8(pb));
-            std::vector<float> va = bytes_to_pcm(ra);
-            std::vector<float> vb = bytes_to_pcm(rb);
-            QMetaObject::invokeMethod(this, [this, va, vb, gen] {
-                if (gen != load_gen) return;
-                wave[0]->set_pcm(va);
-                wave[1]->set_pcm(vb);
-            }, Qt::QueuedConnection);
-        });
+        eng[0]->load(a);
+        eng[1]->load(b);
+        const QString paths[2] = {a, b};
+        for (int i = 0; i < 2; i++) {
+            if (wave_dec[i].joinable()) wave_dec[i].join();
+            wave_dec[i] = std::thread([this, i, paths] {
+                QByteArray pcm = decode_wave_pcm(paths[i]);
+                if (!wave_alive) return;
+                QMetaObject::invokeMethod(this, [this, i, pcm] {
+                    wave[i]->set_pcm(bytes_to_pcm(pcm));
+                }, Qt::QueuedConnection);
+            });
+        }
     }
 
     void stop_all() {
-        pl[0]->stop();
-        pl[1]->stop();
+        eng[0]->stop();
+        eng[1]->stop();
     }
 
     ~AudioCompare() override {
-        alive = false;
-        if (dec_thread.joinable()) dec_thread.join();
+        wave_alive = false;
+        for (int i = 0; i < 2; i++)
+            if (wave_dec[i].joinable()) wave_dec[i].join();
     }
 
 private:
-    std::thread dec_thread;
-    std::atomic<bool> alive{false};
-    uint64_t load_gen = 0;
+    std::thread wave_dec[2];
+    std::atomic<bool> wave_alive{true};
 };
 
 }  // namespace neon_gui
