@@ -55,7 +55,7 @@ jobs:
           path: |
             D:\src\ocvbuild
             D:\src\opencv
-          key: opencv-4.10.0-static-msvc-v3
+          key: opencv-4.10.0-static-msvc-v4
 
       - name: build static opencv (core imgproc imgcodecs)
         if: steps.ocvcache.outputs.cache-hit != 'true'
@@ -69,7 +69,7 @@ jobs:
             "-DBUILD_EXAMPLES=OFF" "-DBUILD_opencv_apps=OFF" "-DBUILD_JPEG=ON" "-DBUILD_PNG=ON" `
             "-DBUILD_ZLIB=ON" "-DBUILD_WEBP=ON" "-DBUILD_TIFF=ON" "-DBUILD_OPENEXR=OFF" `
             "-DWITH_IPP=OFF" "-DWITH_ITT=OFF" "-DWITH_TBB=OFF" `
-            "-DWITH_FFMPEG=OFF" "-DWITH_GTK=OFF" "-DWITH_OPENEXR=OFF" "-DWITH_JASPER=OFF"
+            "-DWITH_FFMPEG=OFF" "-DWITH_GTK=OFF" "-DWITH_OPENEXR=OFF" "-DWITH_JASPER=OFF" "-DENABLE_LIBJPEG_TURBO_SIMD=OFF"
           cmake --build D:\src\ocvbuild --config Release -j 4
 
       - name: generate static plugin imports
@@ -180,7 +180,7 @@ jobs:
           path: |
             /opt/src/ocvbuild
             /opt/src/opencv
-          key: opencv-4.10.0-static-linux-v3
+          key: opencv-4.10.0-static-linux-v4
 
       - name: build static opencv
         if: steps.ocvcache.outputs.cache-hit != 'true'
@@ -193,7 +193,7 @@ jobs:
             -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DBUILD_JPEG=ON -DBUILD_PNG=ON \
             -DBUILD_ZLIB=ON -DBUILD_WEBP=ON -DBUILD_TIFF=ON -DBUILD_OPENEXR=OFF \
             -DBUILD_JPEG2000=OFF -DWITH_IPP=OFF -DWITH_ITT=OFF -DWITH_TBB=OFF \
-            -DWITH_FFMPEG=OFF -DWITH_GTK=OFF -DWITH_OPENEXR=OFF -DWITH_JASPER=OFF
+            -DWITH_FFMPEG=OFF -DWITH_GTK=OFF -DWITH_OPENEXR=OFF -DWITH_JASPER=OFF -DENABLE_LIBJPEG_TURBO_SIMD=OFF
           cmake --build /opt/src/ocvbuild -j "$(nproc)"
 
       - name: generate static plugin imports

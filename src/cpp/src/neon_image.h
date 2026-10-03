@@ -14,7 +14,36 @@ namespace neon {
 inline cv::Mat imread_robust(const std::string& path, int flags = cv::IMREAD_COLOR) {
     std::vector<uint8_t> bytes = read_file_bytes(path);
     if (bytes.empty()) return cv::Mat();
-    return cv::imdecode(bytes, flags);
+    cv::Mat img = cv::imdecode(bytes, flags);
+    if (!img.empty()) return img;
+    // second layer: anything ffmpeg decodes but the built-in codecs do not
+    // (exotic jpeg variants, avif/heic builds, ...) comes through the pipe
+    std::string cap;
+    if (!run_ok({"ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height", "-of", "csv=p=0", path}, &cap) || cap.empty())
+        return cv::Mat();
+    int w = 0, h = 0;
+    if (std::sscanf(cap.c_str(), "%d,%d", &w, &h) != 2 || w <= 0 || h <= 0 ||
+        (int64_t)w * h > 4000ll * 4000ll)
+        return cv::Mat();
+    Proc p;
+    if (!p.spawn({"ffmpeg", "-hide_banner", "-loglevel", "error", "-i", path,
+                  "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"},
+                 true, false))
+        return cv::Mat();
+    size_t need = size_t(w) * size_t(h) * 3;
+    std::vector<uint8_t> raw(need);
+    size_t got = 0;
+    while (got < need) {
+        size_t n = std::fread(raw.data() + got, 1, need - got, p.out);
+        if (n == 0) break;
+        got += n;
+    }
+    p.wait_close();
+    if (got < need) return cv::Mat();
+    cv::Mat out(h, w, CV_8UC3);
+    std::memcpy(out.data, raw.data(), need);
+    return out;
 }
 
 inline bool imwrite_robust(const std::string& path, const cv::Mat& img,
