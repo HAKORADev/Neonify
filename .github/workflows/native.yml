@@ -214,7 +214,7 @@ jobs:
           ls results/*_neonify_*.png > /dev/null || { echo "image smoke FAILED"; exit 1; }
           ./build/neonify image test_assets/text.png --keep-inside
           [ $(ls results/*_neonify_*.png | wc -l) -ge 2 ] || { echo "keep-inside smoke FAILED"; exit 1; }
-          ./build/neonify image test_assets/text.jpg
+          NEONIFY_TRACE=1 ./build/neonify image test_assets/text.jpg
           [ $(ls results/ | wc -l) -ge 3 ] || { echo "jpg smoke FAILED"; exit 1; }
           ./build/neonify image test_assets/sweep.png --palette spectrum
           [ $(ls results/*_neonify_spectrum_*.png | wc -l) -ge 1 ] || { echo "spectrum smoke FAILED"; exit 1; }

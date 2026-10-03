@@ -63,6 +63,19 @@ inline const char* const BANNER_ROWS[6] = {
     "|_| \\_|______\\____/|_| \\_|_____|_|       |_|   ",
 };
 
+// env-gated stderr breadcrumbs: NEONIFY_TRACE=1 ./neonify ...
+inline bool trace_enabled() {
+    static bool t = (std::getenv("NEONIFY_TRACE") != nullptr);
+    return t;
+}
+
+inline void trace(const char* tag) {
+    if (trace_enabled()) {
+        std::fprintf(stderr, "[trace] %s\n", tag);
+        std::fflush(stderr);
+    }
+}
+
 inline bool stdout_is_tty() {
 #ifdef _WIN32
     return _isatty(_fileno(stdout)) != 0;

@@ -58,6 +58,7 @@ inline cv::Mat imread_robust(const std::string& path, int flags = cv::IMREAD_COL
     if (bytes.empty()) return cv::Mat();
     // some opencv builds throw instead of returning empty on formats their
     // codec layer rejects — catch so the fallback layers get their turn
+    trace("read: bytes ok");
     cv::Mat img;
     try {
         img = cv::imdecode(bytes, flags);
@@ -65,9 +66,12 @@ inline cv::Mat imread_robust(const std::string& path, int flags = cv::IMREAD_COL
         img = cv::Mat();
     }
     if (!img.empty()) return img;
+    trace("read: cv layer empty");
     // second layer: stb speaks jpg/png/bmp/gif/psd/pic/pnm regardless of how
     // the opencv build turned out
+    trace("read: stb enter");
     img = stb_decode(bytes, (flags == cv::IMREAD_UNCHANGED) ? 4 : 3);
+    trace("read: stb done");
     if (!img.empty()) return img;
     // third layer: anything ffmpeg decodes but the built-in codecs do not
     std::string cap;
@@ -78,6 +82,7 @@ inline cv::Mat imread_robust(const std::string& path, int flags = cv::IMREAD_COL
     if (std::sscanf(cap.c_str(), "%d,%d", &w, &h) != 2 || w <= 0 || h <= 0 ||
         (int64_t)w * h > 4000ll * 4000ll)
         return cv::Mat();
+    trace("read: ffmpeg fallback");
     Proc p;
     if (!p.spawn({"ffmpeg", "-hide_banner", "-loglevel", "error", "-i", path,
                   "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"},
@@ -454,13 +459,16 @@ inline std::string neonize_image_file(const std::string& inp, const std::string&
     } else {
         bgr = img;
     }
+    trace("engine: start");
     if (tracker) {
         tracker->set_stages({"edges", "bloom"});
         tracker->begin_stage(0);
     }
+    trace("engine: neon pass");
     EdgeAux aux;
     cv::Mat out, field, edges;
     process_image_neon(bgr, palette, glow, threshold, env, out, aux, &field, &edges);
+    trace("engine: neon done");
     if (tracker) tracker->begin_stage(1);
     if (keep_inside) keep_inside_composite(out, bgr, edges, field);
     if (!alpha8.empty()) {
@@ -472,6 +480,7 @@ inline std::string neonize_image_file(const std::string& inp, const std::string&
         cv::merge(och, out);
     }
     if (tracker) tracker->step(0.9f);
+    trace("engine: write");
     std::string finalp = unique_output_path(out_path);
     std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, 6};
     if (!imwrite_robust(finalp, out, params))
