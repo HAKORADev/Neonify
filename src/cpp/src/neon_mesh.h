@@ -16,7 +16,7 @@ struct Mesh {
 };
 
 inline bool looks_ascii(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f = open_ifstream(path, std::ios::binary);
     char buf[1024];
     f.read(buf, sizeof(buf));
     auto n = f.gcount();
@@ -31,7 +31,7 @@ inline Mesh load_mesh(const std::string& path) {
     Mesh m;
     std::string ext = lower_ext(path);
     if (ext == ".obj") {
-        std::ifstream f(path);
+        std::ifstream f = open_ifstream(path);
         std::string line;
         while (std::getline(f, line)) {
             if (line.size() > 2 && line[0] == 'v' && line[1] == ' ') {
@@ -51,7 +51,7 @@ inline Mesh load_mesh(const std::string& path) {
             }
         }
     } else if (ext == ".stl") {
-        std::ifstream f(path, std::ios::binary);
+        std::ifstream f = open_ifstream(path, std::ios::binary);
         char head[5] = {0};
         f.read(head, 5);
         f.seekg(0);
@@ -90,7 +90,7 @@ inline Mesh load_mesh(const std::string& path) {
             }
         }
     } else if (ext == ".ply") {
-        std::ifstream f(path, std::ios::binary);
+        std::ifstream f = open_ifstream(path, std::ios::binary);
         std::string header, ln;
         while (std::getline(f, ln)) {
             header += ln + "\n";
@@ -306,7 +306,7 @@ inline bool render_turntable_pipe(const std::string& out_path, const Mesh& mesh,
 }
 
 inline void save_mesh_obj(const std::string& path, const Mesh& mesh) {
-    std::ofstream f(path, std::ios::binary);
+    std::ofstream f = open_ofstream(path, std::ios::binary);
     if (!f.good()) throw std::runtime_error("cannot write mesh: " + path);
     f.setf(std::ios::fixed);
     f.precision(6);
@@ -342,7 +342,7 @@ inline std::string neonize_mesh_file(const std::string& inp, const std::string& 
     } else {
         cv::Mat img = render_neon_mesh(mesh, 960, 720, azimuth * float(M_PI) / 180.f,
                                        elevation * float(M_PI) / 180.f, palette, glow);
-        cv::imwrite(finalp, img, {cv::IMWRITE_PNG_COMPRESSION, 6});
+        imwrite_robust(finalp, img, {cv::IMWRITE_PNG_COMPRESSION, 6});
     }
     if (tracker) {
         tracker->complete_stage(1);
@@ -358,7 +358,7 @@ inline std::string neonize_relief_file(const std::string& inp, const std::string
                                        const std::string& palette, float glow, float depth,
                                        int turntable, float azimuth, float elevation,
                                        StageTracker* tracker, bool export_mesh = false) {
-    cv::Mat img = cv::imread(inp, cv::IMREAD_COLOR);
+    cv::Mat img = imread_robust(inp, cv::IMREAD_COLOR);
     if (img.empty()) throw std::runtime_error("cannot read image: " + inp);
     Mesh mesh;
     image_relief_mesh(img, 110, depth, mesh);
@@ -378,7 +378,7 @@ inline std::string neonize_relief_file(const std::string& inp, const std::string
     } else {
         cv::Mat out = render_neon_mesh(mesh, 960, 720, azimuth * float(M_PI) / 180.f,
                                        elevation * float(M_PI) / 180.f, palette, glow);
-        cv::imwrite(finalp, out);
+        imwrite_robust(finalp, out);
     }
     if (export_mesh)
         save_mesh_obj(unique_output_path(out_path.substr(0, out_path.find_last_of('.')) + "_mesh.obj"), mesh);

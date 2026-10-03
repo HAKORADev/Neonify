@@ -11,6 +11,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <sstream>
 #include <string>
@@ -46,7 +47,6 @@ inline const char* NEON_RESET = "\033[0m";
 
 inline constexpr int AUDIO_SR = 22050;
 inline const char* APP_NAME = "NEONIFY";
-inline const char* APP_TAG = "dark&white neon media neonifier";
 inline const char* APP_VER = "v0.5.0";
 
 // ---------------------------------------------------------------- banner
@@ -95,11 +95,126 @@ inline void print_banner() {
         return;
     }
     std::printf("%s%s%s\n", NEON_BLUE, NEON_BOLD, banner_rows[0].c_str());
-    std::printf("%s%s%s%s  %s%s\n", NEON_BLUE, banner_rows[1].c_str(), NEON_RESET, NEON_DIM, APP_TAG, NEON_RESET);
+    std::printf("%s%s%s\n", NEON_BLUE, banner_rows[1].c_str(), NEON_RESET);
     std::printf("%s%s%s\n", NEON_PINK, banner_rows[2].c_str(), NEON_RESET);
-    std::printf("%s%s%s%s  %s  \xc2\xb7  cpu-native \xc2\xb7 no gpu needed%s\n",
-                NEON_PINK, banner_rows[3].c_str(), NEON_RESET, NEON_DIM, APP_VER, NEON_RESET);
+    std::printf("%s%s%s%s%s\n", NEON_PINK, banner_rows[3].c_str(), NEON_RESET, NEON_DIM, APP_VER);
     std::printf("%s%s%s\n\n", NEON_BLUE, banner_rows[4].c_str(), NEON_RESET);
+}
+
+// ------------------------------------------------------- unicode-safe file io
+// windows ansi fopen/imread/imwrite silently fail on non-ascii paths;
+// every engine file access goes through here (utf-8 in, wide on win32)
+inline std::vector<uint8_t> read_file_bytes(const std::string& path) {
+    std::vector<uint8_t> data;
+#ifdef _WIN32
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+    if (wlen <= 0) return data;
+    std::wstring w((size_t)wlen, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, &w[0], wlen);
+    FILE* f = _wfopen(w.c_str(), L"rb");
+#else
+    FILE* f = std::fopen(path.c_str(), "rb");
+#endif
+    if (!f) return data;
+    std::fseek(f, 0, SEEK_END);
+    long sz = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (sz > 0) {
+        data.resize((size_t)sz);
+        size_t got = std::fread(data.data(), 1, (size_t)sz, f);
+        data.resize(got);
+    }
+    std::fclose(f);
+    return data;
+}
+
+inline bool write_file_bytes(const std::string& path, const uint8_t* data, size_t n) {
+#ifdef _WIN32
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+    if (wlen <= 0) return false;
+    std::wstring w((size_t)wlen, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, &w[0], wlen);
+    FILE* f = _wfopen(w.c_str(), L"wb");
+#else
+    FILE* f = std::fopen(path.c_str(), "wb");
+#endif
+    if (!f) return false;
+    size_t put = n ? std::fwrite(data, 1, n, f) : 1;
+    std::fclose(f);
+    return put == n;
+}
+
+inline bool make_dir(const std::string& path) {
+#ifdef _WIN32
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+    if (wlen <= 0) return false;
+    std::wstring w((size_t)wlen, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, &w[0], wlen);
+    return CreateDirectoryW(w.c_str(), nullptr) != 0 || GetLastError() == ERROR_ALREADY_EXISTS;
+#else
+    return mkdir(path.c_str(), 0755) == 0 || errno == EEXIST;
+#endif
+}
+
+inline bool move_file(const std::string& from, const std::string& to) {
+#ifdef _WIN32
+    auto to_w = [](const std::string& s) {
+        int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+        std::wstring w((size_t)std::max(len, 1), L'\0');
+        if (len > 0) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &w[0], len);
+        return w;
+    };
+    return MoveFileExW(to_w(from).c_str(), to_w(to).c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+#else
+    return std::rename(from.c_str(), to.c_str()) == 0;
+#endif
+}
+
+inline bool remove_file(const std::string& path) {
+#ifdef _WIN32
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+    if (wlen <= 0) return false;
+    std::wstring w((size_t)wlen, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, &w[0], wlen);
+    return DeleteFileW(w.c_str()) != 0;
+#else
+    return std::remove(path.c_str()) == 0;
+#endif
+}
+
+#ifdef _WIN32
+inline std::wstring wide_from_utf8(const std::string& s) {
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    std::wstring w((size_t)std::max(len, 1), L'\0');
+    if (len > 0) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &w[0], len);
+    return w;
+}
+#endif
+
+#ifdef _WIN32
+inline std::ifstream open_ifstream(const std::string& path, std::ios::openmode mode = std::ios::in) {
+    return std::ifstream(wide_from_utf8(path), mode);
+}
+inline std::ofstream open_ofstream(const std::string& path, std::ios::openmode mode = std::ios::out) {
+    return std::ofstream(wide_from_utf8(path), mode);
+}
+#else
+inline std::ifstream open_ifstream(const std::string& path, std::ios::openmode mode = std::ios::in) {
+    return std::ifstream(path, mode);
+}
+inline std::ofstream open_ofstream(const std::string& path, std::ios::openmode mode = std::ios::out) {
+    return std::ofstream(path, mode);
+}
+#endif
+
+inline bool file_exists(const std::string& p) {
+#ifdef _WIN32
+    DWORD a = GetFileAttributesW(wide_from_utf8(p).c_str());
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+#else
+    struct stat st{};
+    return stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+#endif
 }
 
 // ---------------------------------------------------------------- naming
@@ -117,9 +232,7 @@ inline std::string timestamp_suffix() {
 }
 
 inline std::string unique_output_path(const std::string& path) {
-    std::ifstream f(path.c_str());
-    if (!f.good()) return path;
-    f.close();
+    if (!file_exists(path)) return path;
     std::string::size_type dot = path.find_last_of('.');
     if (dot == std::string::npos || dot == 0) return path + timestamp_suffix();
     return path.substr(0, dot) + timestamp_suffix() + path.substr(dot);
@@ -149,11 +262,7 @@ inline std::string cwd() {
 
 inline std::string results_dir() {
     std::string d = cwd() + "/results";
-#ifdef _WIN32
-    CreateDirectoryA(d.c_str(), nullptr);
-#else
-    mkdir(d.c_str(), 0755);
-#endif
+    make_dir(d);
     return d;
 }
 
@@ -163,15 +272,16 @@ inline std::string results_path(const std::string& name) {
 
 inline void remove_tree(const std::string& p) {
 #ifdef _WIN32
-    SHFILEOPSTRUCTA op{};
-    std::vector<char> from(p.begin(), p.end());
-    from.push_back('\0');
-    from.push_back('\0');
+    SHFILEOPSTRUCTW op{};
+    std::wstring w = wide_from_utf8(p);
+    std::vector<wchar_t> from(w.begin(), w.end());
+    from.push_back(L'\0');
+    from.push_back(L'\0');
     op.hwnd = nullptr;
     op.wFunc = FO_DELETE;
     op.pFrom = from.data();
     op.fFlags = FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT;
-    SHFileOperationA(&op);
+    SHFileOperationW(&op);
 #else
     pid_t p2 = fork();
     if (p2 == 0) {
@@ -306,7 +416,7 @@ public:
         HANDLE orr = nullptr, owr = nullptr, irr = nullptr, iwr = nullptr;
         if (capture_out && !CreatePipe(&orr, &owr, &sa, 0)) return false;
         if (feed_in && !CreatePipe(&irr, &iwr, &sa, 0)) return false;
-        STARTUPINFOA si{};
+        STARTUPINFOW si{};
         si.cb = sizeof(si);
         si.dwFlags = STARTF_USESTDHANDLES;
         si.hStdInput = feed_in ? irr : HANDLE(_get_osfhandle(_fileno(stdin)));
@@ -317,9 +427,10 @@ public:
             if (i) cmd += " ";
             cmd += quote(argv[i]);
         }
-        std::vector<char> cmdv(cmd.begin(), cmd.end());
-        cmdv.push_back('\0');
-        if (!CreateProcessA(nullptr, cmdv.data(), nullptr, nullptr, TRUE,
+        std::wstring wcmd = wide_from_utf8(cmd);
+        std::vector<wchar_t> cmdv(wcmd.begin(), wcmd.end());
+        cmdv.push_back(L'\0');
+        if (!CreateProcessW(nullptr, cmdv.data(), nullptr, nullptr, TRUE,
                             CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
             return false;
         }
@@ -380,8 +491,8 @@ private:
 #ifdef _WIN32
     PROCESS_INFORMATION pi{};
     static std::string quote(const std::string& s) {
-        if (s.find(' ') == std::string::npos) return s;
-        return "\"" + s + "\"";
+        if (s.find(' ') == std::string::npos && !s.empty()) return s;
+        return '"' + s + '"';
     }
 #else
     pid_t pid = -1;
@@ -394,7 +505,7 @@ inline bool run_ok(const std::vector<std::string>& argv, std::string* capture = 
     HANDLE orr = nullptr, owr = nullptr;
     bool need = capture != nullptr;
     if (need && !CreatePipe(&orr, &owr, &sa, 0)) return false;
-    STARTUPINFOA si{};
+    STARTUPINFOW si{};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput = HANDLE(_get_osfhandle(_fileno(stdin)));
@@ -404,13 +515,14 @@ inline bool run_ok(const std::vector<std::string>& argv, std::string* capture = 
     for (size_t i = 0; i < argv.size(); i++) {
         if (i) cmd += " ";
         std::string q = argv[i];
-        if (q.find(' ') != std::string::npos) q = "\"" + q + "\"";
+        if (q.find(' ') != std::string::npos || q.empty()) q = '"' + q + '"';
         cmd += q;
     }
-    std::vector<char> cmdv(cmd.begin(), cmd.end());
-    cmdv.push_back('\0');
+    std::wstring wcmd = wide_from_utf8(cmd);
+    std::vector<wchar_t> cmdv(wcmd.begin(), wcmd.end());
+    cmdv.push_back(L'\0');
     PROCESS_INFORMATION pi{};
-    BOOL okf = CreateProcessA(nullptr, cmdv.data(), nullptr, nullptr, TRUE,
+    BOOL okf = CreateProcessW(nullptr, cmdv.data(), nullptr, nullptr, TRUE,
                               CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
     if (owr) CloseHandle(owr);
     if (!okf) return false;
@@ -463,12 +575,14 @@ inline void write_wav_stereo(const std::string& path, const std::vector<float>& 
     float k = p > 1e-9f ? 0.89f / p : 1.0f;
     size_t n = std::min(l.size(), r.size());
     uint32_t data_bytes = uint32_t(n * 4);
-    std::ofstream f(path, std::ios::binary);
-    auto u32 = [&](uint32_t v) { f.write((char*)&v, 4); };
-    auto u16 = [&](uint16_t v) { f.write((char*)&v, 2); };
-    f.write("RIFF", 4);
+    std::vector<uint8_t> wav;
+    wav.reserve(size_t(data_bytes) + 44);
+    auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; i++) wav.push_back(uint8_t(v >> (8 * i))); };
+    auto u16 = [&](uint16_t v) { for (int i = 0; i < 2; i++) wav.push_back(uint8_t(v >> (8 * i))); };
+    auto str = [&](const char* s, size_t len) { for (size_t i = 0; i < len; i++) wav.push_back(uint8_t(s[i])); };
+    str("RIFF", 4);
     u32(36 + data_bytes);
-    f.write("WAVEfmt ", 8);
+    str("WAVEfmt ", 8);
     u32(16);
     u16(1);
     u16(2);
@@ -476,21 +590,19 @@ inline void write_wav_stereo(const std::string& path, const std::vector<float>& 
     u32(uint32_t(sr * 4));
     u16(4);
     u16(16);
-    f.write("data", 4);
+    str("data", 4);
     u32(data_bytes);
     for (size_t i = 0; i < n; i++) {
         int16_t a = int16_t(std::max(-32768.f, std::min(32767.f, l[i] * k * 32767.f)));
         int16_t b = int16_t(std::max(-32768.f, std::min(32767.f, r[i] * k * 32767.f)));
-        f.write((char*)&a, 2);
-        f.write((char*)&b, 2);
+        u16(uint16_t(a));
+        u16(uint16_t(b));
     }
+    if (!write_file_bytes(path, wav.data(), wav.size()))
+        throw std::runtime_error("cannot write audio: " + path);
 }
 
 // ---------------------------------------------------------------- misc
-inline bool file_exists(const std::string& p) {
-    std::ifstream f(p);
-    return f.good();
-}
 
 // windowed exe: re-attach to the cmd that launched `neonify.exe cli`
 // double-click (no parent console) skips silently, GUI stays clean
@@ -527,6 +639,29 @@ inline bool which_ok(const std::string& tool) {
 #else
     std::string cmd = "command -v " + tool + " >/dev/null 2>&1";
     return std::system(cmd.c_str()) == 0;
+#endif
+}
+
+// ansi main() argv mangles non-ascii paths on windows; read the wide command line
+inline std::vector<std::string> utf8_args(int argc, char** argv) {
+#ifdef _WIN32
+    (void)argc; (void)argv;
+    std::vector<std::string> out;
+    int n = 0;
+    LPWSTR* w = CommandLineToArgvW(GetCommandLineW(), &n);
+    if (!w) return out;
+    for (int i = 1; i < n; i++) {
+        int len = WideCharToMultiByte(CP_UTF8, 0, w[i], -1, nullptr, 0, nullptr, nullptr);
+        if (len <= 0) continue;
+        std::string s((size_t)len, '\0');
+        WideCharToMultiByte(CP_UTF8, 0, w[i], -1, &s[0], len, nullptr, nullptr);
+        while (!s.empty() && s.back() == '\0') s.pop_back();
+        out.push_back(s);
+    }
+    LocalFree(w);
+    return out;
+#else
+    return std::vector<std::string>(argv + 1, argv + argc);
 #endif
 }
 

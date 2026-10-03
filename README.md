@@ -15,7 +15,7 @@
 
 Neonify turns images, videos, audio and 3D meshes into neon art. It runs locally on your machine, no accounts, no uploads.
 
-Images: edges become glowing tubes, PNG transparency is kept. Videos: the same treatment per frame, with an option to run the audio through it too. Audio: seven profiles (fire, ice, robotic, ghost, void, echo, slash) that each react to the Glow setting. 3D: OBJ / PLY / STL rendered as neon wireframes, still or as a 360° turntable video, plus image-to-relief remeshing with OBJ export.
+Images: edges become glowing tubes, PNG transparency is kept, and an optional keep-inside mode preserves the original look inside the detected edges. Videos: the same treatment per frame, with an option to run the audio through it too. Audio: seven profiles (fire, ice, robotic, ghost, void, echo, slash) that each react to the Glow setting. 3D: OBJ / PLY / STL rendered as neon wireframes, still or as a 360° turntable video, plus image-to-relief remeshing with OBJ export.
 
 ## Download
 

@@ -906,10 +906,7 @@ class NeonifyGUI(QMainWindow):
         title_box = QVBoxLayout()
         title = QLabel("NEONIFY")
         title.setStyleSheet(f"color: {THEME['text']}; font-size: 22px; font-weight: bold; letter-spacing: 4px;")
-        subtitle = QLabel("Procedural Neon Art Tool — pure math, zero AI")
-        subtitle.setStyleSheet(f"color: {THEME['text_secondary']}; font-size: 11px;")
         title_box.addWidget(title)
-        title_box.addWidget(subtitle)
         header.addWidget(logo_label)
         header.addLayout(title_box)
         header.addStretch()
@@ -1036,6 +1033,10 @@ class NeonifyGUI(QMainWindow):
         self.spatial_check.setChecked(True)
         settings.addWidget(self.spatial_check)
 
+        self.keep_inside_check = QCheckBox("Keep the inside (original look inside the edges)")
+        self.keep_inside_check.setStyleSheet(get_checkbox_style())
+        settings.addWidget(self.keep_inside_check)
+
         self.hwaccel_check = QCheckBox("ffmpeg hwaccel decode (optional)")
         self.hwaccel_check.setStyleSheet(get_checkbox_style())
         settings.addWidget(self.hwaccel_check)
@@ -1090,8 +1091,12 @@ class NeonifyGUI(QMainWindow):
         self.play_btn.clicked.connect(self._toggle_play)
         preview_header.addWidget(preview_title)
         preview_header.addStretch()
+        self.clear_preview_btn = QPushButton("Clear previews")
+        self.clear_preview_btn.setStyleSheet(get_surface_button_style())
+        self.clear_preview_btn.clicked.connect(self._clear_previews)
         preview_header.addWidget(self.play_btn)
         preview_header.addWidget(self.preview_mode_btn)
+        preview_header.addWidget(self.clear_preview_btn)
         preview_layout.addLayout(preview_header)
 
         self.preview_stack = QStackedWidget()
@@ -1232,6 +1237,8 @@ class NeonifyGUI(QMainWindow):
                     args.append('--no-spatial')
                 if self.hwaccel_check.isChecked():
                     args.append('--hwaccel')
+            if command in ('image', 'video') and self.keep_inside_check.isChecked():
+                args.append('--keep-inside')
             if self.next_to_input_check.isChecked():
                 args.append('--next-to-input')
             if turntable > 0:
@@ -1256,6 +1263,17 @@ class NeonifyGUI(QMainWindow):
         self.progress_bar.setValue(percent)
         display = step if len(step) < 70 else step[:67] + "..."
         self.status_label.setText(display)
+
+    def _clear_previews(self):
+        if self.media_player is not None:
+            self.media_player.stop()
+        self.last_input = None
+        self.last_output = None
+        self.temp_preview = None
+        self.preview_stack.setCurrentIndex(1)
+        self.viewer.setPixmap(QPixmap())
+        self.preview_caption.setText("Results appear here after processing")
+        self.status_label.setText("")
 
     def _on_file_done(self, input_path, output_path, status):
         self.last_output = output_path

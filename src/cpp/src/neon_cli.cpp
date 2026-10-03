@@ -206,16 +206,16 @@ inline bool ask_advanced_audio(const std::string& profile, Advanced& out) {
     return any;
 }
 
-inline void check_env() {
+inline bool check_env() {
     std::printf("%senvironment%s\n", NEON_DIM, NEON_RESET);
     std::printf("  opencv      %s\n", cv::getVersionString().c_str());
     std::string ff = which_path("ffmpeg");
     std::printf("  ffmpeg      %s\n", ff.empty() ? "not found (video/audio disabled \xe2\x80\x94 install ffmpeg)"
                                                             : ff.c_str());
     unsigned cores = std::thread::hardware_concurrency();
-    std::printf("  cpu cores   %u  \xc2\xb7  device: CPU (native \xe2\x80\x94 no GPU required)\n",
-                cores ? cores : 1u);
+    std::printf("  cpu cores   %u\n", cores ? cores : 1u);
     std::printf("\n");
+    return !ff.empty();
 }
 
 inline void list_profiles() {
@@ -223,8 +223,6 @@ inline void list_profiles() {
     std::printf("%saudio profiles%s\n", NEON_BOLD, NEON_RESET);
     for (const char* n : AUDIO_PROFILES)
         std::printf("  %-8s %s\n", n, PROFILE_DESCRIPTIONS(n));
-    std::printf("\n%severy profile responds to --glow differently \xe2\x80\x94 they are not one settings sheet%s\n",
-                NEON_DIM, NEON_RESET);
 }
 
 // ---------------------------------------------------------------- flows
@@ -235,7 +233,8 @@ inline void flow_image(const std::vector<std::string>& inputs, const Options& o,
         std::string out = unique_or_default(o.output,
             default_output_for(inp, o.palette, ext_of(inp), o.next_to_input));
         EdgeAux aux;
-        std::string path = neonize_image_file(inp, out, o.palette, o.glow, o.threshold, o.env, &tr, &aux);
+        std::string path = neonize_image_file(inp, out, o.palette, o.glow, o.threshold, o.env, &tr,
+                                              &aux, o.keep_inside);
         std::printf("%s  \xe2\x86\x92 %s   (noise %.1f, pre-blur %.2f)%s\n", NEON_DIM, path.c_str(),
                     aux.noise, aux.pre_sigma, NEON_RESET);
     }
@@ -247,7 +246,7 @@ inline void flow_video(const std::vector<std::string>& inputs, const Options& o,
         std::string out = unique_or_default(o.output,
             default_output_for(inp, o.palette, ".mp4", o.next_to_input));
         auto r = process_video_file(inp, out, o.palette, o.glow, o.threshold, o.env,
-                                    o.profile, o.spatial, o.neon_audio, o.advanced, &tr);
+                                    o.profile, o.spatial, o.neon_audio, o.advanced, &tr, o.keep_inside);
         std::printf("%s  \xe2\x86\x92 %s  (%d frames)%s\n", NEON_DIM, r.first.c_str(), r.second, NEON_RESET);
     }
 }
@@ -274,7 +273,7 @@ inline void flow_mesh(const std::vector<std::string>& inputs, const Options& o, 
         std::string path;
         if (relief)
             path = neonize_relief_file(inp, out, o.palette, o.glow, o.depth,
-                                       o.turntable > 0 ? o.turntable : 48, o.azimuth, o.elevation, &tr,
+                                       o.turntable, o.azimuth, o.elevation, &tr,
                                        o.export_mesh);
         else
             path = neonize_mesh_file(inp, out, o.palette, o.glow, o.turntable, o.azimuth, o.elevation, &tr);
@@ -283,18 +282,10 @@ inline void flow_mesh(const std::vector<std::string>& inputs, const Options& o, 
 }
 
 // ---------------------------------------------------------------- interactive
+// auto-detect: the user gives files or folders, the cli figures out what is
+// inside (images / videos / audio / 3d) and asks per type actually present
 
-struct KindSpec { const char* kind; std::vector<const char*> exts; };
-
-inline void interactive_single(const KindSpec& spec, bool ffmpeg_ok) {
-    std::string kind = spec.kind;
-    if (!ffmpeg_ok && (kind == "video" || kind == "audio")) {
-        std::printf("%sffmpeg missing \xe2\x80\x94 %s needs it. install ffmpeg first.%s\n",
-                    NEON_DIM, kind.c_str(), NEON_RESET);
-        return;
-    }
-    std::string raw = ask_line("  input " + kind + " file(s), comma separated > ");
-    if (raw.empty()) return;
+inline std::vector<std::string> split_csv(const std::string& raw) {
     std::vector<std::string> parts;
     std::string::size_type pos = 0;
     while (pos < raw.size()) {
@@ -304,125 +295,108 @@ inline void interactive_single(const KindSpec& spec, bool ffmpeg_ok) {
         if (!piece.empty()) parts.push_back(piece);
         pos = comma + 1;
     }
-    std::vector<std::string> inputs = collect_inputs(parts, spec.exts);
-    if (inputs.empty()) {
-        std::printf("%sno valid %s files found%s\n", NEON_DIM, kind.c_str(), NEON_RESET);
-        return;
-    }
+    return parts;
+}
+
+inline void ask_keep_inside(Options& o) {
+    o.keep_inside = trim(ask_line("  keep the inside (original look inside the edges) [y/N] > ")) == "y";
+}
+
+inline void ask_audio_block(Options& o) {
+    o.profile = ask_audio_profile();
+    Advanced adv;
+    if (trim(ask_line("  advanced audio settings? [y/N] > ")) == "y")
+        ask_advanced_audio(o.profile, adv);
+    o.advanced = adv;
+}
+
+inline void run_detected(const std::vector<std::string>& imgs, const std::vector<std::string>& vids,
+                         const std::vector<std::string>& auds, const std::vector<std::string>& meshes,
+                         bool ffmpeg_ok) {
     Options o;
+    bool has_vis = !imgs.empty() || !vids.empty();
     o.palette = ask_palette();
     o.glow = ask_float("glow", 1.0f, 0.1f, 3.0f);
     o.threshold = ask_float("edge threshold", 0.12f, 0.02f, 0.5f);
     o.env = ask_float("ambient detail", 1.0f, 0.0f, 2.0f);
+    if (has_vis) ask_keep_inside(o);
+    if (!vids.empty()) {
+        o.spatial = trim(ask_line("  spatial glow (stereo \xe2\x86\x92 direction) [Y/n] > ")) != "n";
+        o.neon_audio = trim(ask_line("  neonify the audio too? [y/N] > ")) == "y";
+        if (o.neon_audio) ask_audio_block(o);
+    }
+    if (!auds.empty() && !o.neon_audio) ask_audio_block(o);
+    if (!meshes.empty()) {
+        o.turntable = int(ask_float("turntable frames (0 = single image)", 48, 0, 600));
+        o.azimuth = ask_float("azimuth", 30.0f, 0.0f, 360.0f);
+        o.elevation = ask_float("elevation", 20.0f, -89.0f, 89.0f);
+        o.depth = ask_float("relief depth", 0.85f, 0.1f, 3.0f);
+    }
     StageTracker tracker;
     try {
-        if (kind == "image") {
-            flow_image(inputs, o, tracker);
-        } else if (kind == "video") {
-            o.spatial = trim(ask_line("  spatial glow (stereo \xe2\x86\x92 direction) [Y/n] > ")) != "n";
-            o.neon_audio = trim(ask_line("  neonify the audio too? [y/N] > ")) == "y";
-            if (o.neon_audio) {
-                o.profile = ask_audio_profile();
-                Advanced adv;
-                if (trim(ask_line("  advanced audio settings? [y/N] > ")) == "y")
-                    ask_advanced_audio(o.profile, adv);
-                o.advanced = adv;
-            }
-            flow_video(inputs, o, tracker);
-        } else if (kind == "audio") {
-            o.profile = ask_audio_profile();
-            Advanced adv;
-            if (trim(ask_line("  advanced audio settings? [y/N] > ")) == "y")
-                ask_advanced_audio(o.profile, adv);
-            o.advanced = adv;
-            flow_audio(inputs, o, tracker);
-        } else {  // mesh/relief
-            o.turntable = int(ask_float("turntable frames (0 = single image)", 48, 0, 600));
-            o.azimuth = ask_float("azimuth", 30.0f, 0.0f, 360.0f);
-            o.elevation = ask_float("elevation", 20.0f, -89.0f, 89.0f);
-            o.depth = ask_float("relief depth", 0.85f, 0.1f, 3.0f);
-            flow_mesh(inputs, o, tracker);
+        if (!imgs.empty()) flow_image(imgs, o, tracker);
+        if (!vids.empty()) {
+            if (!ffmpeg_ok)
+                std::printf("%sffmpeg missing \xe2\x80\x94 video needs it. install ffmpeg first.%s\n",
+                            NEON_DIM, NEON_RESET);
+            else
+                flow_video(vids, o, tracker);
         }
+        if (!auds.empty()) {
+            if (!ffmpeg_ok)
+                std::printf("%sffmpeg missing \xe2\x80\x94 audio needs it. install ffmpeg first.%s\n",
+                            NEON_DIM, NEON_RESET);
+            else {
+                if (o.profile.empty()) o.profile = "slash";
+                flow_audio(auds, o, tracker);
+            }
+        }
+        if (!meshes.empty()) flow_mesh(meshes, o, tracker);
     } catch (const std::exception& e) {
         std::printf("%serror: %s%s\n", NEON_PINK, e.what(), NEON_RESET);
     }
 }
 
-inline void interactive_batch(bool ffmpeg_ok) {
-    std::string folder = ask_line("  folder > ");
-    if (folder.empty()) return;
-    if (!is_dir(folder)) {
-        std::printf("%snot a folder%s\n", NEON_DIM, NEON_RESET);
-        return;
+inline std::string counts_desc(int ni, int nv, int na, int nm) {
+    std::vector<std::string> parts;
+    if (ni) parts.push_back(std::to_string(ni) + (ni == 1 ? " image" : " images"));
+    if (nv) parts.push_back(std::to_string(nv) + (nv == 1 ? " video" : " videos"));
+    if (na) parts.push_back(std::to_string(na) + (na == 1 ? " audio" : " audio files"));
+    if (nm) parts.push_back(std::to_string(nm) + (nm == 1 ? " 3d mesh" : " 3d meshes"));
+    std::string out;
+    for (size_t i = 0; i < parts.size(); i++) {
+        if (i) out += (i + 1 == parts.size()) ? " and " : ", ";
+        out += parts[i];
     }
-    const std::vector<const char*> media = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff",
-                                            ".mp4", ".avi", ".mkv", ".mov", ".webm", ".gif",
-                                            ".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma"};
-    std::vector<std::string> files = collect_inputs({folder}, media);
-    if (files.empty()) {
-        std::printf("%sno media files in folder%s\n", NEON_DIM, NEON_RESET);
-        return;
-    }
-    bool all_imgs = true;
-    for (const auto& f : files)
-        if (!is_ext(f, {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"})) { all_imgs = false; break; }
-    Options o;
-    o.palette = ask_palette();
-    o.glow = ask_float("glow", 1.0f, 0.1f, 3.0f);
-    o.threshold = ask_float("edge threshold", 0.12f, 0.02f, 0.5f);
-    o.env = ask_float("ambient detail", 1.0f, 0.0f, 2.0f);
-    if (!all_imgs) {
-        o.spatial = trim(ask_line("  spatial glow (stereo \xe2\x86\x92 direction) [Y/n] > ")) != "n";
-        o.neon_audio = trim(ask_line("  neonify the audio too? [y/N] > ")) == "y";
-        if (o.neon_audio) {
-            o.profile = ask_audio_profile();
-            Advanced adv;
-            if (trim(ask_line("  advanced audio settings? [y/N] > ")) == "y")
-                ask_advanced_audio(o.profile, adv);
-            o.advanced = adv;
-        }
-    }
-    StageTracker tracker;
-    try {
-        auto imgs = collect_inputs({folder}, {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"});
-        auto vids = collect_inputs({folder}, {".mp4", ".avi", ".mkv", ".mov", ".webm", ".gif"});
-        auto auds = collect_inputs({folder}, {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma"});
-        if (!imgs.empty()) flow_image(imgs, o, tracker);
-        if (ffmpeg_ok && !vids.empty()) flow_video(vids, o, tracker);
-        if (ffmpeg_ok && !auds.empty()) {
-            if (o.profile.empty()) o.profile = "slash";
-            flow_audio(auds, o, tracker);
-        }
-    } catch (const std::exception& e) {
-        std::printf("%serror: %s%s\n", NEON_PINK, e.what(), NEON_RESET);
-    }
+    return out;
 }
 
 inline int interactive_mode(bool ffmpeg_ok) {
     print_banner();
-    check_env();
+    ffmpeg_ok = check_env();
     const std::vector<const char*> img = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"};
     const std::vector<const char*> vid = {".mp4", ".avi", ".mkv", ".mov", ".webm", ".gif"};
     const std::vector<const char*> aud = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma"};
+    const std::vector<const char*> mesh = {".obj", ".ply", ".stl"};
     while (true) {
-        std::printf("%swhat are we neonifying?%s\n", NEON_BOLD, NEON_RESET);
-        std::printf("  %s1%s) image\n", NEON_BLUE, NEON_RESET);
-        std::printf("  %s2%s) video\n", NEON_BLUE, NEON_RESET);
-        std::printf("  %s3%s) audio\n", NEON_BLUE, NEON_RESET);
-        std::printf("  %s4%s) 3d mesh / relief\n", NEON_BLUE, NEON_RESET);
-        std::printf("  %s5%s) batch folder\n", NEON_BLUE, NEON_RESET);
-        std::printf("  %sq%s) quit\n", NEON_BLUE, NEON_RESET);
-        std::string choice = ask_line(std::string(NEON_PINK) + ">" + NEON_RESET + " ");
-        if (choice == "q" || choice == "quit" || choice == "exit") return 0;
-        if (choice == "1") interactive_single({"image", img}, ffmpeg_ok);
-        else if (choice == "2") interactive_single({"video", vid}, ffmpeg_ok);
-        else if (choice == "3") interactive_single({"audio", aud}, ffmpeg_ok);
-        else if (choice == "4") {
-            std::vector<const char*> mesh = img;
-            mesh.push_back(".obj"); mesh.push_back(".ply"); mesh.push_back(".stl");
-            interactive_single({"mesh/relief", mesh}, ffmpeg_ok);
-        } else if (choice == "5") interactive_batch(ffmpeg_ok);
-        else std::printf("%stry 1-5 or q%s\n", NEON_DIM, NEON_RESET);
+        std::string raw = ask_line("inputs (files or folders, comma separated) > ");
+        if (raw.empty()) continue;
+        if (raw == "q" || raw == "quit" || raw == "exit") return 0;
+        std::vector<std::string> parts = split_csv(raw);
+        auto imgs = collect_inputs(parts, img);
+        auto vids = collect_inputs(parts, vid);
+        auto auds = collect_inputs(parts, aud);
+        auto meshes = collect_inputs(parts, mesh);
+        int total = int(imgs.size() + vids.size() + auds.size() + meshes.size());
+        if (!total) {
+            std::printf("%sno media files found%s\n", NEON_DIM, NEON_RESET);
+            continue;
+        }
+        std::printf("%sfound: %s%s\n", NEON_DIM,
+                    counts_desc(int(imgs.size()), int(vids.size()), int(auds.size()),
+                                int(meshes.size())).c_str(),
+                    NEON_RESET);
+        run_detected(imgs, vids, auds, meshes, ffmpeg_ok);
     }
 }
 
@@ -446,6 +420,8 @@ inline void print_usage() {
         "  --env <0-2>              ambient detail (default 1)\n"
         "  -o, --output <path>      output path\n"
         "  --next-to-input          save outputs next to the input file instead of results/\n"
+        "  --keep-inside            keep the original look inside the detected edges\n"
+        "                           (images and videos)\n"
         "  --profile <name>         audio profile: fire ice robotic ghost void echo slash\n"
         "  --neon-audio             neonify the audio with the video\n"
         "  --no-spatial             disable spatial glow (stereo pan)\n"
@@ -467,7 +443,7 @@ inline int run_cli(int argc, char** argv) {
 #ifndef _WIN32
     console_utf8();
 #endif
-    std::vector<std::string> args(argv + 1, argv + argc);
+    std::vector<std::string> args = utf8_args(argc, argv);
     std::string command;
     std::vector<std::string> inputs;
     Options o;
@@ -487,6 +463,7 @@ inline int run_cli(int argc, char** argv) {
         else if (a == "--env") o.env = next_float(1.0f);
         else if (a == "-o" || a == "--output") o.output = next_str("");
         else if (a == "--next-to-input") o.next_to_input = true;
+        else if (a == "--keep-inside") o.keep_inside = true;
         else if (a == "--profile") o.profile = next_str("");
         else if (a == "--neon-audio") o.neon_audio = true;
         else if (a == "--no-spatial") o.spatial = false;
@@ -533,14 +510,13 @@ inline int run_cli(int argc, char** argv) {
         return neon_gui::run_gui(argc, argv);
 #endif
     if (inputs.empty()) {
-        print_banner();
-        std::printf("no input given \xe2\x80\x94 entering interactive mode\n\n");
+        if (command == "image" || command == "video" || command == "audio" ||
+            command == "mesh" || command == "batch")
+            std::printf("no input given \xe2\x80\x94 entering interactive mode\n\n");
         return interactive_mode(which_ok("ffmpeg"));
     }
 
     bool ffmpeg_ok = which_ok("ffmpeg");
-    print_banner();
-    check_env();
     if ((command == "video" || command == "audio") && !ffmpeg_ok) {
         std::printf("ffmpeg required for video/audio. install it, then retry.\n");
         return 1;
@@ -553,6 +529,10 @@ inline int run_cli(int argc, char** argv) {
             auto imgs = collect_inputs(inputs, {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"});
             auto vids = collect_inputs(inputs, {".mp4", ".avi", ".mkv", ".mov", ".webm", ".gif"});
             auto auds = collect_inputs(inputs, {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma"});
+            if (imgs.empty() && vids.empty() && auds.empty()) {
+                std::printf("no valid input files found\n");
+                return 1;
+            }
             if (!imgs.empty()) flow_image(imgs, o, tracker);
             if (!vids.empty() && ffmpeg_ok) flow_video(vids, o, tracker);
             if (!auds.empty() && ffmpeg_ok) {
@@ -561,13 +541,21 @@ inline int run_cli(int argc, char** argv) {
                 flow_audio(auds, ao, tracker);
             }
         } else if (command == "image") {
-            flow_image(collect_inputs(inputs, {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}), o, tracker);
+            auto files = collect_inputs(inputs, {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"});
+            if (files.empty()) { std::printf("no valid input files found\n"); return 1; }
+            flow_image(files, o, tracker);
         } else if (command == "video") {
-            flow_video(collect_inputs(inputs, {".mp4", ".avi", ".mkv", ".mov", ".webm", ".gif"}), o, tracker);
+            auto files = collect_inputs(inputs, {".mp4", ".avi", ".mkv", ".mov", ".webm", ".gif"});
+            if (files.empty()) { std::printf("no valid input files found\n"); return 1; }
+            flow_video(files, o, tracker);
         } else if (command == "audio") {
-            flow_audio(collect_inputs(inputs, {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma"}), o, tracker);
+            auto files = collect_inputs(inputs, {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma"});
+            if (files.empty()) { std::printf("no valid input files found\n"); return 1; }
+            flow_audio(files, o, tracker);
         } else if (command == "mesh") {
-            flow_mesh(collect_inputs(inputs, {".obj", ".ply", ".stl", ".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}), o, tracker);
+            auto files = collect_inputs(inputs, {".obj", ".ply", ".stl", ".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"});
+            if (files.empty()) { std::printf("no valid input files found\n"); return 1; }
+            flow_mesh(files, o, tracker);
         } else {
             std::printf("unknown command \xe2\x80\x94 use image / video / audio / mesh / batch / profiles / gui\n");
             return 2;

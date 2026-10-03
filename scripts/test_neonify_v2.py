@@ -191,7 +191,7 @@ ns = p.parse_args(['image', 'x.png', '--palette', 'ice', '--neon-audio', '--prof
 check('argparse palette choices', ns.palette == 'ice')
 src_txt = open(os.path.join(ROOT, 'src', 'python', 'neonify.py')).read()
 check('no --device flag anywhere', "'--device'" not in src_txt and '"--device"' not in src_txt)
-check('no cli subcommand (mode is implicit)', "add_parser('cli'" not in src_txt)
+check('cli subcommand enters interactive mode', "args.command == 'cli'" in src_txt)
 check('no cuda/gpu theater in engine', 'cuda' not in src_txt.lower())
 
 print()

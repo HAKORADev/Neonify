@@ -87,7 +87,7 @@ inline std::pair<std::string, int> process_video_file(
         const std::string& inp, const std::string& out_path, const std::string& palette,
         float glow, float threshold, float env, const std::string& audio_profile,
         bool spatial_glow, bool neon_audio, const Advanced& advanced_audio,
-        StageTracker* tracker) {
+        StageTracker* tracker, bool keep_inside = false) {
     VideoInfo probe = probe_video(inp);
     if (!probe.ok) throw std::runtime_error("cannot probe video: " + inp);
     int w = probe.w, h = probe.h;
@@ -98,11 +98,7 @@ inline std::pair<std::string, int> process_video_file(
         h -= h % 2;
     }
     std::string tmp = "neonify_tmp_" + timestamp_suffix().substr(1);
-#ifdef _WIN32
-    CreateDirectoryA(tmp.c_str(), nullptr);
-#else
-    mkdir(tmp.c_str(), 0755);
-#endif
+    make_dir(tmp);
 
     bool has_audio = has_audio_stream(inp);
     bool will_neon_audio = has_audio && neon_audio && !audio_profile.empty();
@@ -209,6 +205,7 @@ inline std::pair<std::string, int> process_video_file(
                 field = cv::min(field + wide * addk, 1.0f);
             }
             cv::Mat out = colorize(field, palette);
+            if (keep_inside) keep_inside_composite(out, frame, edges);
             std::fwrite(out.data, 1, frame_bytes, wr.in);
             frame_no++;
             if (tracker && frame_no % 5 == 0)
@@ -245,14 +242,9 @@ inline std::pair<std::string, int> process_video_file(
     std::string finalp;
     if (file_exists(raw_out)) {
         finalp = unique_output_path(out_path);
-        std::remove(finalp.c_str());
-        int code = 0;
-#ifdef _WIN32
-        if (!MoveFileExA(raw_out.c_str(), finalp.c_str(), MOVEFILE_REPLACE_EXISTING)) code = 1;
-#else
-        code = int(std::rename(raw_out.c_str(), finalp.c_str()));
-#endif
-        if (code != 0) throw std::runtime_error("video encode failed: rename " + inp);
+        remove_file(finalp);
+        if (!move_file(raw_out, finalp))
+            throw std::runtime_error("video encode failed: rename " + finalp);
     } else {
         throw std::runtime_error("video encode failed: " + inp);
     }

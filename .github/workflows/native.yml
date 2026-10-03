@@ -93,6 +93,16 @@ jobs:
           $out = & build\Release\neonify.exe image test_assets\text.png 2>&1 | Out-String
           Write-Host $out
           if (-not (Test-Path "results\*_neonify_*.png")) { Write-Host "image smoke FAILED - no output"; exit 1 }
+          $outki = & build\Release\neonify.exe image test_assets\text.png --keep-inside 2>&1 | Out-String
+          Write-Host $outki
+          $ki = Get-ChildItem "results\*_neonify_*.png" | Measure-Object
+          if ($ki.Count -lt 2) { Write-Host "keep-inside smoke FAILED"; exit 1 }
+          New-Item -ItemType Directory -Force -Path "unicode dir" | Out-Null
+          Copy-Item test_assets\text.png "unicode dir\ñéo öü.png"
+          $outu = & build\Release\neonify.exe image "unicode dir\ñéo öü.png" 2>&1 | Out-String
+          Write-Host $outu
+          $uni = Get-ChildItem "results\*neonify*.png" | Measure-Object
+          if ($uni.Count -lt 3) { Write-Host "unicode path smoke FAILED"; exit 1 }
           $ff = Get-Command ffmpeg -ErrorAction SilentlyContinue
           if ($ff) {
             $out2 = & build\Release\neonify.exe audio test_assets\stereo.wav 2>&1 | Out-String
@@ -108,17 +118,6 @@ jobs:
           Copy-Item build\Release\neonify.exe dist\neonify\
           Copy-Item packaging\windows\cli.bat dist\neonify\
           Copy-Item packaging\windows\cmd.bat dist\neonify\
-          $readme = @"
-          NEONIFY v${{ inputs.version }} - native windows build
-
-          neonify.exe   the app. double-click = gui
-          cli.bat       interactive cli
-          cmd.bat       terminal here
-          ffmpeg        needed for video/audio. install once: winget install FFmpeg
-
-          outputs land in results\ next to the app. everything runs on cpu.
-          "@
-          $readme | Out-File -Encoding utf8 dist\neonify\README.txt
           Compress-Archive -Path dist\neonify -DestinationPath "neonify-windows-cpp-v${{ inputs.version }}.zip"
 
       - uses: actions/upload-artifact@v4
@@ -141,7 +140,7 @@ jobs:
             libxcb-randr0-dev libxcb-render-util0-dev libxcb-util-dev libxcb-xinerama0-dev \
             libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev \
             libfreetype6-dev libgl1-mesa-dev libglib2.0-dev ninja-build \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libunwind-dev
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libunwind-dev xvfb
 
       - name: cache static qt
         id: qtcache
@@ -204,7 +203,19 @@ jobs:
         run: |
           ./build/neonify image test_assets/text.png
           ls results/*_neonify_*.png > /dev/null || { echo "image smoke FAILED"; exit 1; }
+          ./build/neonify image test_assets/text.png --keep-inside
+          [ $(ls results/*_neonify_*.png | wc -l) -ge 2 ] || { echo "keep-inside smoke FAILED"; exit 1; }
+          mkdir -p "unicode dir"
+          cp test_assets/text.png "unicode dir/ñéo öü.png"
+          ./build/neonify image "unicode dir/ñéo öü.png"
+          [ $(ls results/*neonify*.png | wc -l) -ge 3 ] || { echo "unicode path smoke FAILED"; exit 1; }
           echo "smoke OK"
+
+      - name: gui startup smoke (xvfb, 8s alive)
+        run: |
+          timeout 8 xvfb-run -a ./build/neonify gui; code=$?
+          if [ $code -ne 124 ] && [ $code -ne 0 ]; then echo "gui startup smoke FAILED (exit $code)"; exit 1; fi
+          echo "gui startup OK"
 
       - name: collect portable bundle
         run: |
@@ -212,14 +223,6 @@ jobs:
           cp build/neonify dist/neonify/
           cp packaging/linux/cli.sh dist/neonify/ 2>/dev/null || true
           chmod +x dist/neonify/neonify
-          cat > dist/neonify/README.txt <<EOF
-          NEONIFY v${{ inputs.version }} - native linux build
-
-          ./neonify      the app. no args = gui, "neonify cli" = interactive cli
-          ffmpeg         needed for video/audio (install: sudo apt install ffmpeg)
-
-          outputs land in results/ next to the app. everything runs on cpu.
-          EOF
           tar -czf "neonify-linux-cpp-v${{ inputs.version }}.tar.gz" -C dist neonify
 
       - uses: actions/upload-artifact@v4
@@ -246,17 +249,6 @@ jobs:
         run: |
           Copy-Item packaging\windows\cli.bat dist\neonify\
           Copy-Item packaging\windows\cmd.bat dist\neonify\
-          $readme = @"
-          NEONIFY v${{ inputs.version }} - python build (windows)
-
-          neonify.exe   the app. double-click = gui
-          cli.bat       interactive cli
-          cmd.bat       terminal here
-          ffmpeg        install once: winget install FFmpeg
-
-          outputs land in results\ next to the app.
-          "@
-          $readme | Out-File -Encoding utf8 dist\neonify\README.txt
           Compress-Archive -Path dist\neonify -DestinationPath "neonify-windows-python-v${{ inputs.version }}.zip"
       - uses: actions/upload-artifact@v4
         with:
@@ -281,14 +273,6 @@ jobs:
         run: |
           cp packaging/linux/cli.sh dist/neonify/ 2>/dev/null || true
           cp packaging/linux/install.sh dist/neonify/ 2>/dev/null || true
-          cat > dist/neonify/README.txt <<EOF
-          NEONIFY v${{ inputs.version }} - python build (linux)
-
-          ./neonify      the app. no args = gui, "./neonify cli" = interactive cli
-          ffmpeg         install once: sudo apt install ffmpeg
-
-          outputs land in results/ next to the app.
-          EOF
           tar -czf "neonify-linux-python-v${{ inputs.version }}.tar.gz" -C dist neonify
       - uses: actions/upload-artifact@v4
         with:

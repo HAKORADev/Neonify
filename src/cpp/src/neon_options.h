@@ -12,6 +12,7 @@ struct Options {
     float env = 1.0f;
     std::string output;
     bool next_to_input = false;
+    bool keep_inside = false;
     std::string profile;
     bool spatial = true;
     bool neon_audio = false;

@@ -10,6 +10,22 @@
 
 namespace neon {
 
+// unicode-safe imdecode/imencode: opencv ansi paths fail on windows for non-ascii files
+inline cv::Mat imread_robust(const std::string& path, int flags = cv::IMREAD_COLOR) {
+    std::vector<uint8_t> bytes = read_file_bytes(path);
+    if (bytes.empty()) return cv::Mat();
+    return cv::imdecode(bytes, flags);
+}
+
+inline bool imwrite_robust(const std::string& path, const cv::Mat& img,
+                           const std::vector<int>& params = {}) {
+    std::string ext = lower_ext(path);
+    if (ext.empty()) ext = ".png";
+    std::vector<uint8_t> buf;
+    if (!cv::imencode(ext, img, buf, params)) return false;
+    return write_file_bytes(path, buf.data(), buf.size());
+}
+
 inline const char* PALETTE_NAMES[] = {"electric", "crimson", "ice", "toxic", "violet", "golden", "ghost"};
 inline constexpr float GLOW_SIGMAS[4] = {2.0f, 6.0f, 16.0f, 38.0f};
 inline constexpr float GLOW_WEIGHTS[4] = {0.9f, 0.62f, 0.45f, 0.32f};
@@ -217,21 +233,57 @@ inline cv::Mat colorize(const cv::Mat& field, const std::string& palette, float 
 
 inline void process_image_neon(const cv::Mat& img_bgr, const std::string& palette,
                                float glow, float threshold, float env,
-                               cv::Mat& out, EdgeAux& aux, cv::Mat* field_out = nullptr) {
+                               cv::Mat& out, EdgeAux& aux, cv::Mat* field_out = nullptr,
+                               cv::Mat* edges_out = nullptr) {
     cv::Mat edges;
     edge_field(img_bgr, glow, threshold, env, edges, aux);
     cv::Mat field;
     neon_glow_stack(img_bgr, edges, glow, env, threshold, field);
     out = colorize(field, palette);
     if (field_out) *field_out = field;
+    if (edges_out) *edges_out = edges;
+}
+
+// keep-inside law: the regions enclosed by the detected edges keep their original
+// look; the edges themselves and everything outside stay neon
+inline cv::Mat keep_inside_mask(const cv::Mat& edges) {
+    cv::Mat e8;
+    edges.convertTo(e8, CV_8U, 255.0);
+    cv::threshold(e8, e8, 80, 255, cv::THRESH_BINARY);
+    cv::dilate(e8, e8, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5)));
+    cv::Mat padded = cv::Mat::zeros(e8.rows + 2, e8.cols + 2, CV_8U);
+    e8.copyTo(padded(cv::Rect(1, 1, e8.cols, e8.rows)));
+    cv::Mat inv;
+    cv::subtract(cv::Scalar::all(255), padded, inv);
+    cv::floodFill(inv, cv::Point(0, 0), cv::Scalar(128), nullptr, cv::Scalar(), cv::Scalar(), 4);
+    cv::Mat holes = (inv == 255);
+    cv::Mat holef;
+    holes.convertTo(holef, CV_32F, 1.0 / 255.0);
+    cv::Mat hole_in = holef(cv::Rect(1, 1, e8.cols, e8.rows)).clone();
+    cv::Mat soft = 1.0 - smoothstep(0.04f, 0.30f, edges);
+    cv::Mat m = hole_in.mul(soft);
+    return gaussian_blur(m, 1.2f);
+}
+
+inline void keep_inside_composite(cv::Mat& neon_out, const cv::Mat& orig_bgr, const cv::Mat& edges) {
+    if (neon_out.empty() || orig_bgr.empty() || edges.empty()) return;
+    cv::Mat m = keep_inside_mask(edges);
+    cv::Mat m3;
+    cv::Mat chs[3] = {m, m, m};
+    cv::merge(chs, 3, m3);
+    cv::Mat orig32, out32;
+    orig_bgr.convertTo(orig32, CV_32F);
+    neon_out.convertTo(out32, CV_32F);
+    cv::Mat mixed = out32.mul(1.0 - m3) + orig32.mul(m3);
+    mixed.convertTo(neon_out, CV_8U);
 }
 
 inline std::string neonize_image_file(const std::string& inp, const std::string& out_path,
                                       const std::string& palette, float glow,
                                       float threshold, float env, StageTracker* tracker,
-                                      EdgeAux* aux_out = nullptr) {
-    cv::Mat img = cv::imread(inp, cv::IMREAD_UNCHANGED);
-    if (img.empty()) img = cv::imread(inp, cv::IMREAD_COLOR);
+                                      EdgeAux* aux_out = nullptr, bool keep_inside = false) {
+    cv::Mat img = imread_robust(inp, cv::IMREAD_UNCHANGED);
+    if (img.empty()) img = imread_robust(inp, cv::IMREAD_COLOR);
     if (img.empty()) throw std::runtime_error("cannot read image: " + inp);
     if (img.depth() != CV_8U) {
         cv::Mat c8;
@@ -256,8 +308,9 @@ inline std::string neonize_image_file(const std::string& inp, const std::string&
     }
     if (tracker) tracker->step(0.5f);
     EdgeAux aux;
-    cv::Mat out, field;
-    process_image_neon(bgr, palette, glow, threshold, env, out, aux, &field);
+    cv::Mat out, field, edges;
+    process_image_neon(bgr, palette, glow, threshold, env, out, aux, &field, &edges);
+    if (keep_inside) keep_inside_composite(out, bgr, edges);
     if (!alpha8.empty()) {
         cv::Mat a32, f32;
         alpha8.convertTo(a32, CV_32F, 1.0 / 255.0);
@@ -273,7 +326,7 @@ inline std::string neonize_image_file(const std::string& inp, const std::string&
     if (tracker) tracker->step(0.9f);
     std::string finalp = unique_output_path(out_path);
     std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, 6};
-    if (!cv::imwrite(finalp, out, params))
+    if (!imwrite_robust(finalp, out, params))
         throw std::runtime_error("cannot write image: " + finalp);
     if (aux_out) *aux_out = aux;
     return finalp;
