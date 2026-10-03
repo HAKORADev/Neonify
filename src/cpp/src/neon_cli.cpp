@@ -366,7 +366,7 @@ public:
                 last_len = 0;
             }
             std::string msg = e.what();
-            if (msg.size() > 40) msg = msg.substr(0, 40);
+            if (msg.size() > 160) msg = msg.substr(0, 160);
             std::printf("%s  Error: %s%s\n", NEON_DIM, msg.c_str(), NEON_RESET);
             errors++;
         } catch (...) {

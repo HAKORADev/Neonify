@@ -236,7 +236,7 @@ jobs:
             -I/opt/src/ocvbuild -o /tmp/probe \
             -Wl,--start-group /opt/src/ocvbuild/lib/libopencv_imgcodecs.a \
             /opt/src/ocvbuild/lib/libopencv_imgproc.a /opt/src/ocvbuild/lib/libopencv_core.a \
-            /opt/src/ocvbuild/3rdparty/lib/libjpeg-turbo.a /opt/src/ocvbuild/3rdparty/lib/liblibwebp.a \
+            /opt/src/ocvbuild/3rdparty/lib/liblibjpeg-turbo.a /opt/src/ocvbuild/3rdparty/lib/liblibwebp.a \
             /opt/src/ocvbuild/3rdparty/lib/liblibpng.a /opt/src/ocvbuild/3rdparty/lib/liblibtiff.a \
             /opt/src/ocvbuild/3rdparty/lib/libzlib.a -Wl,--end-group -lpthread -ldl -lm || echo "probe compile failed"
           /tmp/probe || true

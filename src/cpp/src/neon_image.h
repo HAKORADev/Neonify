@@ -56,7 +56,14 @@ inline cv::Mat stb_decode(const std::vector<uint8_t>& bytes, int want_channels) 
 inline cv::Mat imread_robust(const std::string& path, int flags = cv::IMREAD_COLOR) {
     std::vector<uint8_t> bytes = read_file_bytes(path);
     if (bytes.empty()) return cv::Mat();
-    cv::Mat img = cv::imdecode(bytes, flags);
+    // some opencv builds throw instead of returning empty on formats their
+    // codec layer rejects — catch so the fallback layers get their turn
+    cv::Mat img;
+    try {
+        img = cv::imdecode(bytes, flags);
+    } catch (const cv::Exception&) {
+        img = cv::Mat();
+    }
     if (!img.empty()) return img;
     // second layer: stb speaks jpg/png/bmp/gif/psd/pic/pnm regardless of how
     // the opencv build turned out
@@ -96,12 +103,23 @@ inline bool imwrite_robust(const std::string& path, const cv::Mat& img,
     std::string ext = lower_ext(path);
     if (ext.empty()) ext = ".png";
     std::vector<uint8_t> buf;
-    if (!cv::imencode(ext, img, buf, params)) {
+    bool encoded = false;
+    try {
+        encoded = cv::imencode(ext, img, buf, params);
+    } catch (const cv::Exception&) {
+        encoded = false;
+    }
+    if (!encoded) {
         // encoder gap on some builds: fall back to png, the name keeps the law
         std::string::size_type dot = path.find_last_of('.');
         std::string png_path = (dot == std::string::npos) ? path + ".png"
                                                           : path.substr(0, dot) + ".png";
-        if (!cv::imencode(".png", img, buf, params)) return false;
+        try {
+            encoded = cv::imencode(".png", img, buf, params);
+        } catch (const cv::Exception&) {
+            encoded = false;
+        }
+        if (!encoded) return false;
         return write_file_bytes(png_path, buf.data(), buf.size());
     }
     return write_file_bytes(path, buf.data(), buf.size());
