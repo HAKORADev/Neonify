@@ -87,6 +87,20 @@ jobs:
             -DOpenCV_DIR="D:\src\ocvbuild"
           cmake --build build --config Release -j 4
 
+      - name: smoke test (the real exe, image + audio)
+        shell: pwsh
+        run: |
+          $out = & build\Release\neonify.exe image test_assets\text.png 2>&1 | Out-String
+          Write-Host $out
+          if (-not (Test-Path "results\*_neonify_*.png")) { Write-Host "image smoke FAILED - no output"; exit 1 }
+          $ff = Get-Command ffmpeg -ErrorAction SilentlyContinue
+          if ($ff) {
+            $out2 = & build\Release\neonify.exe audio test_assets\stereo.wav 2>&1 | Out-String
+            Write-Host $out2
+            if (-not (Test-Path "results\*_neonify_*.wav")) { Write-Host "audio smoke FAILED - no output"; exit 1 }
+          } else { Write-Host "ffmpeg not on runner - audio smoke skipped" }
+          Write-Host "smoke OK"
+
       - name: collect portable bundle
         shell: pwsh
         run: |
@@ -185,6 +199,12 @@ jobs:
           cmake -S src/cpp -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DQt5_DIR=/opt/qts/lib/cmake/Qt5 -DOpenCV_DIR=/opt/src/ocvbuild
           cmake --build build -j "$(nproc)"
+
+      - name: smoke test (the real binary, image)
+        run: |
+          ./build/neonify image test_assets/text.png
+          ls results/*_neonify_*.png > /dev/null || { echo "image smoke FAILED"; exit 1; }
+          echo "smoke OK"
 
       - name: collect portable bundle
         run: |
