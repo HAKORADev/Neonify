@@ -2004,7 +2004,8 @@ def _command_for(inp):
 def interactive_mode():
     print_banner()
     ff = shutil.which('ffmpeg')
-    print(f"{NEON_DIM}ffmpeg: {ff or 'NOT FOUND (video and audio need it \u2014 install ffmpeg)'}{NEON_RESET}")
+    ff_disp = ff if ff else 'NOT FOUND (video and audio need it \u2014 install ffmpeg)'
+    print(f"{NEON_DIM}ffmpeg: {ff_disp}{NEON_RESET}")
     while True:
         _section("INPUT SELECTION")
         print("\nEnter input path(s) - separate multiple paths with spaces")

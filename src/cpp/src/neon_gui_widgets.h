@@ -27,6 +27,7 @@
 #include <QDateTime>
 #include <QAudioOutput>
 #include <QAudioFormat>
+#include <QIODevice>
 #include <cmath>
 #include <QFile>
 #include <condition_variable>
@@ -241,7 +242,8 @@ private slots:
             qint64 byte_at = qint64(double(fed_us) / 1e6 * 44100.0 * speed) * 4;
             if (byte_at >= buf.size()) break;
             int chunk = int(std::min<qint64>(std::min<qint64>(free_b, 16384), buf.size() - byte_at));
-            qint64 wrote = out->write(buf.constData() + byte_at, chunk);
+            if (!dev) break;
+            qint64 wrote = dev->write(buf.constData() + byte_at, chunk);
             if (wrote <= 0) break;
             fed_us += qint64(double(wrote / 4) / (44100.0 * speed) * 1e6);
             free_b -= int(wrote);
@@ -285,6 +287,7 @@ private:
             out->stop();
             delete out;
             out = nullptr;
+            dev = nullptr;
         }
         base_us = 0;
         fed_us = 0;
@@ -305,8 +308,8 @@ private:
         base_us = 0;
         fed_us = qint64(double(from_ms) / 1000.0 * 1000.0 * speed);
         base_ms = from_ms;
-        out->start();
         buffer_for(speed);
+        dev = out->start();
         playing = true;
         feed->start();
     }
@@ -317,6 +320,7 @@ public:
 private:
     QTimer* feed = nullptr;
     QAudioOutput* out = nullptr;
+    QIODevice* dev = nullptr;
     QByteArray src;
     std::map<double, QByteArray> cache;
     std::thread dec;
