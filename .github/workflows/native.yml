@@ -213,7 +213,8 @@ jobs:
 
       - name: gui startup smoke (xvfb, 8s alive)
         run: |
-          timeout 8 xvfb-run -a ./build/neonify gui; code=$?
+          code=0
+          timeout 8 xvfb-run -a ./build/neonify gui || code=$?
           if [ $code -ne 124 ] && [ $code -ne 0 ]; then echo "gui startup smoke FAILED (exit $code)"; exit 1; fi
           echo "gui startup OK"
 
