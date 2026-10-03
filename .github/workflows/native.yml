@@ -209,6 +209,37 @@ jobs:
 
       - name: smoke test (the real binary, image)
         run: |
+          sha256sum test_assets/text.jpg test_assets/text.png
+          stat -c%s test_assets/text.jpg
+          command -v ffmpeg ffprobe || echo "no ffmpeg/ffprobe on runner"
+          cat > /tmp/probe.cpp << 'EOF'
+          #include <opencv2/core.hpp>
+          #include <opencv2/imgcodecs.hpp>
+          #include <cstdio>
+          #include <vector>
+          int main() {
+              FILE* f = fopen("test_assets/text.jpg", "rb");
+              if (!f) { std::printf("probe: fopen FAILED\n"); return 1; }
+              fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+              std::vector<unsigned char> buf(sz);
+              size_t got = fread(buf.data(), 1, sz, f); fclose(f);
+              std::printf("probe: size %ld read %zu\n", sz, got);
+              cv::Mat m = cv::imdecode(buf, cv::IMREAD_COLOR);
+              std::printf("probe: imdecode empty=%d\n", m.empty() ? 1 : 0);
+              cv::Mat d = cv::imread("test_assets/text.jpg");
+              std::printf("probe: imread empty=%d\n", d.empty() ? 1 : 0);
+              return 0;
+          }
+          EOF
+          g++ -O1 /tmp/probe.cpp -I/opt/src/opencv/modules/core/include \
+            -I/opt/src/opencv/modules/imgcodecs/include -I/opt/src/opencv/modules/imgproc/include \
+            -I/opt/src/ocvbuild -o /tmp/probe \
+            -Wl,--start-group /opt/src/ocvbuild/lib/libopencv_imgcodecs.a \
+            /opt/src/ocvbuild/lib/libopencv_imgproc.a /opt/src/ocvbuild/lib/libopencv_core.a \
+            /opt/src/ocvbuild/3rdparty/lib/libjpeg-turbo.a /opt/src/ocvbuild/3rdparty/lib/liblibwebp.a \
+            /opt/src/ocvbuild/3rdparty/lib/liblibpng.a /opt/src/ocvbuild/3rdparty/lib/liblibtiff.a \
+            /opt/src/ocvbuild/3rdparty/lib/libzlib.a --end-group -lpthread -ldl -lm || echo "probe compile failed"
+          /tmp/probe || true
           ./build/neonify image test_assets/text.png
           ls results/*_neonify_*.png > /dev/null || { echo "image smoke FAILED"; exit 1; }
           ./build/neonify image test_assets/text.png --keep-inside
