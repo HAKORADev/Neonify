@@ -437,7 +437,7 @@ inline std::pair<std::string, std::string> tag_and_ext_for(const std::string& co
         ext = ".mp4";
     } else {
         tag = o.palette;
-        ext = lower_ext(inp);
+        ext = ".png";
     }
     return {tag, ext};
 }

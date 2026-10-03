@@ -176,7 +176,7 @@ public:
         std::string ext = "";
         std::string::size_type dot = inps.find_last_of('.');
         if (dot != std::string::npos) ext = inps.substr(dot);
-        if (k == KImage) { tag = o.palette; }
+        if (k == KImage) { tag = o.palette; ext = ".png"; }
         else if (k == KVideo) { tag = o.palette; ext = ".mp4"; }
         else if (k == KAudio) { tag = o.profile.empty() ? std::string("slash") : o.profile; ext = ".wav"; }
         else if (k == KMesh || k == KRelief) { tag = o.palette + "3d"; ext = o.turntable > 0 ? ".mp4" : ".png"; }

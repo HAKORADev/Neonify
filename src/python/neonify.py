@@ -1884,7 +1884,7 @@ def _tag_and_ext_for(command, inp, opts):
         return f"{opts['palette']}3d", ('.mp4' if opts.get('turntable') else '.png')
     if ext in VID_EXTS:
         return opts['palette'], '.mp4'
-    return opts['palette'], ext
+    return opts['palette'], '.png'
 
 
 def _run_one(inp, outp, command, opts, tracker):
