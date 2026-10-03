@@ -40,10 +40,10 @@ inline cv::Mat stb_decode(const std::vector<uint8_t>& bytes, int want_channels) 
     cv::cvtColor(own, bgra, cv::COLOR_RGBA2BGRA);
     // stb fills alpha=255 for formats without one; collapse to 3ch when the
     // art is fully opaque so downstream encoders see a plain BGR image
-    std::vector<int> chs;
-    cv::split(bgra, chs);
+    cv::Mat alpha;
+    cv::extractChannel(bgra, alpha, 3);
     double amin = 255.0;
-    cv::minMaxIdx(chs[3], &amin, nullptr);
+    cv::minMaxIdx(alpha, &amin, nullptr);
     if (amin >= 255.0) {
         cv::Mat bgr;
         cv::cvtColor(bgra, bgr, cv::COLOR_BGRA2BGR);

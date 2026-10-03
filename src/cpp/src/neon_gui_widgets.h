@@ -59,7 +59,12 @@ inline QColor C_DIM()     { return QColor(0x66, 0x66, 0x66); }
 inline QImage load_image_robust(const QString& path) {
     std::vector<uint8_t> bytes = neon::read_file_bytes(path.toStdString());
     if (bytes.empty()) return QImage();
-    cv::Mat img = cv::imdecode(bytes, cv::IMREAD_COLOR);
+    cv::Mat img;
+    try {
+        img = cv::imdecode(bytes, cv::IMREAD_COLOR);
+    } catch (const cv::Exception&) {
+        img = cv::Mat();
+    }
     if (!img.empty()) {
         QImage view(img.data, img.cols, img.rows, int(img.step), QImage::Format_BGR888);
         QImage own = view.copy();
