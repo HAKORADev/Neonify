@@ -950,3 +950,4 @@ int run_gui(int argc, char** argv) {
 }  // namespace neon_gui
 
 #include "neon_gui.moc"
+#include "moc_neon_gui_widgets.cpp"
