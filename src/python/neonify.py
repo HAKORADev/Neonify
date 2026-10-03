@@ -222,11 +222,16 @@ def timestamp_suffix():
 
 
 def unique_output_path(path):
-    """if path exists, append timestamp instead of overwriting"""
+    """if path exists, append timestamp instead of overwriting.
+    same-second runs collide on the timestamp alone, so keep drawing until free"""
     if not os.path.exists(path):
         return path
     root, ext = os.path.splitext(path)
-    return root + timestamp_suffix() + ext
+    for i in range(1000):
+        cand = root + timestamp_suffix() + ("" if i == 0 else f"_{i}") + ext
+        if not os.path.exists(cand):
+            return cand
+    return path
 
 
 def ensure_dir(d):

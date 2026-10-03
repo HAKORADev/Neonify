@@ -245,8 +245,16 @@ inline std::string timestamp_suffix() {
 inline std::string unique_output_path(const std::string& path) {
     if (!file_exists(path)) return path;
     std::string::size_type dot = path.find_last_of('.');
-    if (dot == std::string::npos || dot == 0) return path + timestamp_suffix();
-    return path.substr(0, dot) + timestamp_suffix() + path.substr(dot);
+    std::string base = (dot == std::string::npos || dot == 0) ? path : path.substr(0, dot);
+    std::string ext = (dot == std::string::npos || dot == 0) ? "" : path.substr(dot);
+    // same-second runs collide on the timestamp alone, so keep drawing until free
+    for (int i = 0; i < 1000; i++) {
+        std::string cand = base + timestamp_suffix();
+        if (i > 0) cand += "_" + std::to_string(i);
+        cand += ext;
+        if (!file_exists(cand)) return cand;
+    }
+    return path;
 }
 
 inline std::string out_default(const std::string& inp, const std::string& tag, const std::string& ext) {
