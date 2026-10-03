@@ -494,17 +494,29 @@ inline bool file_exists(const std::string& p) {
 
 // windowed exe: re-attach to the cmd that launched `neonify.exe cli`
 // double-click (no parent console) skips silently, GUI stays clean
+inline void console_utf8() {
+#ifdef _WIN32
+    SetConsoleOutputCP(65001);
+    SetConsoleCP(65001);
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    if (h != INVALID_HANDLE_VALUE && GetConsoleMode(h, &mode))
+        SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+#endif
+}
+
 inline void attach_parent_console(int argc, char** argv) {
 #ifdef _WIN32
     if (argc < 2) return;
     std::string a0 = argv[1];
     if (a0 == "gui" || a0 == "--help" || a0 == "-h") return;
-    if (GetConsoleWindow() != nullptr) return;
+    if (GetConsoleWindow() != nullptr) { console_utf8(); return; }
     if (!AttachConsole(ATTACH_PARENT_PROCESS)) return;
     freopen("CONOUT$", "w", stdout);
     freopen("CONOUT$", "w", stderr);
     freopen("CONIN$", "r", stdin);
     std::setvbuf(stdout, nullptr, _IONBF, 0);
+    console_utf8();
 #endif
 }
 

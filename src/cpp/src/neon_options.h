@@ -11,6 +11,7 @@ struct Options {
     float threshold = 0.12f;
     float env = 1.0f;
     std::string output;
+    bool next_to_input = false;
     std::string profile;
     bool spatial = true;
     bool neon_audio = false;
@@ -33,91 +34,68 @@ inline const char* PROFILE_DESCRIPTIONS(const std::string& p) {
     return "the signature diagonal energy sweep";
 }
 
-inline const char* const ADV_SCHEMA[][3] = {
-    {"fire", "drive", "heat drive amount"},
-    {"fire", "flicker_rate", "flicker rate (hz)"},
-    {"fire", "flicker_depth", "flicker depth"},
-    {"fire", "crackle", "crackle level"},
-    {"fire", "rumble", "rumble level"},
-    {"fire", "rumble_hz", "rumble cutoff (hz)"},
-    {"ice", "shimmer_mix", "shimmer mix"},
-    {"ice", "breath_rate", "breath rate (hz)"},
-    {"ice", "breath_depth", "breath depth (ms)"},
-    {"ice", "time", "frost echo time (s)"},
-    {"ice", "fb", "frost echo feedback"},
-    {"ice", "damp", "frost damping (hz)"},
-    {"ice", "mix", "frost echo mix"},
-    {"robotic", "ring_hz", "ring modulator (hz)"},
-    {"robotic", "ring_mix", "ring mix"},
-    {"robotic", "comb", "formant comb depth"},
-    {"robotic", "bits", "crush bits"},
-    {"ghost", "fog_mix", "fog mix"},
-    {"ghost", "whisper_rate", "whisper rate (hz)"},
-    {"ghost", "whisper_depth", "whisper depth (ms)"},
-    {"ghost", "time", "far echo time (s)"},
-    {"ghost", "fb", "far echo feedback"},
-    {"ghost", "damp", "far damping (hz)"},
-    {"ghost", "mix", "far echo mix"},
-    {"void", "pitch_mix", "descent mix"},
-    {"void", "mix", "abyss reverb mix"},
-    {"void", "tone", "abyss tone (hz)"},
-    {"void", "time", "cave echo time (s)"},
-    {"void", "fb", "cave feedback"},
-    {"void", "damp", "cave damping (hz)"},
-    {"echo", "time", "echo time (s)"},
-    {"echo", "fb", "feedback"},
-    {"echo", "damp", "damping (hz)"},
-    {"echo", "mix", "echo mix"},
-    {"echo", "lp", "master lowpass (hz)"},
-    {"slash", "gain", "sweep gain"},
+// 1:1 with python AUDIO_ADVANCED_SCHEMA: profile, key, label, lo, hi, default
+inline const char* const ADV_SCHEMA[][6] = {
+    {"fire", "drive", "heat drive amount", "0", "1", "0.52"},
+    {"fire", "flicker_rate", "flicker rate (hz)", "1", "12", "5.5"},
+    {"fire", "flicker_depth", "flicker depth", "0", "0.6", "0.25"},
+    {"fire", "crackle", "crackle level", "0", "1.5", "0.5"},
+    {"fire", "rumble", "rumble level", "0", "1.5", "0.6"},
+    {"fire", "rumble_hz", "rumble cutoff (hz)", "40", "160", "90"},
+    {"ice", "shimmer_mix", "shimmer mix", "0", "1", "0.4"},
+    {"ice", "breath_rate", "breath rate (hz)", "0.1", "2", "0.5"},
+    {"ice", "breath_depth", "breath depth (ms)", "0", "10", "3.5"},
+    {"ice", "time", "frost echo time (s)", "0.05", "1", "0.19"},
+    {"ice", "fb", "frost echo feedback", "0", "0.9", "0.3"},
+    {"ice", "damp", "frost damping (hz)", "1000", "12000", "7000"},
+    {"ice", "mix", "frost echo mix", "0", "1", "0.28"},
+    {"robotic", "ring_hz", "ring modulator (hz)", "40", "220", "88"},
+    {"robotic", "ring_mix", "ring mix", "0", "1", "0.6"},
+    {"robotic", "comb", "formant comb depth", "0", "1", "0.45"},
+    {"robotic", "bits", "crush bits", "6", "16", "10"},
+    {"ghost", "fog_mix", "fog mix", "0", "1", "0.5"},
+    {"ghost", "whisper_rate", "whisper rate (hz)", "0.1", "2", "0.37"},
+    {"ghost", "whisper_depth", "whisper depth (ms)", "0", "12", "5"},
+    {"ghost", "time", "far echo time (s)", "0.05", "1.5", "0.42"},
+    {"ghost", "fb", "far echo feedback", "0", "0.9", "0.42"},
+    {"ghost", "damp", "far damping (hz)", "500", "8000", "2600"},
+    {"ghost", "mix", "far echo mix", "0", "1", "0.3"},
+    {"void", "pitch_mix", "descent mix", "0", "1", "0.45"},
+    {"void", "mix", "abyss reverb mix", "0", "1", "0.5"},
+    {"void", "tone", "abyss tone (hz)", "500", "6000", "1500"},
+    {"void", "time", "cave echo time (s)", "0.05", "1.5", "0.55"},
+    {"void", "fb", "cave feedback", "0", "0.9", "0.5"},
+    {"void", "damp", "cave damping (hz)", "500", "8000", "1800"},
+    {"echo", "time", "echo time (s)", "0.05", "1.5", "0.31"},
+    {"echo", "fb", "feedback", "0", "0.9", "0.45"},
+    {"echo", "damp", "damping (hz)", "500", "12000", "4200"},
+    {"echo", "mix", "echo mix", "0", "1", "0.35"},
+    {"echo", "lp", "master lowpass (hz)", "1000", "16000", "9000"},
+    {"slash", "gain", "sweep gain", "0", "2", "0.55"},
 };
 
+inline const int ADV_SCHEMA_ROWS = int(sizeof(ADV_SCHEMA) / sizeof(ADV_SCHEMA[0]));
+
+inline float adv_lo(int row) { return float(std::atof(ADV_SCHEMA[row][3])); }
+inline float adv_hi(int row) { return float(std::atof(ADV_SCHEMA[row][4])); }
+inline float adv_default(int row) { return float(std::atof(ADV_SCHEMA[row][5])); }
+
 inline float default_advanced_value(const std::string& profile, const std::string& key) {
-    if (profile == "fire") {
-        if (key == "drive") return 0.52f;
-        if (key == "flicker_rate") return 5.5f;
-        if (key == "flicker_depth") return 0.25f;
-        if (key == "crackle") return 0.5f;
-        if (key == "rumble") return 0.6f;
-        if (key == "rumble_hz") return 90.f;
-    } else if (profile == "ice") {
-        if (key == "shimmer_mix") return 0.4f;
-        if (key == "breath_rate") return 0.5f;
-        if (key == "breath_depth") return 3.5f;
-        if (key == "time") return 0.19f;
-        if (key == "fb") return 0.3f;
-        if (key == "damp") return 7000.f;
-        if (key == "mix") return 0.28f;
-    } else if (profile == "robotic") {
-        if (key == "ring_hz") return 88.f;
-        if (key == "ring_mix") return 0.6f;
-        if (key == "comb") return 0.45f;
-        if (key == "bits") return 10.f;
-    } else if (profile == "ghost") {
-        if (key == "fog_mix") return 0.5f;
-        if (key == "whisper_rate") return 0.37f;
-        if (key == "whisper_depth") return 5.f;
-        if (key == "time") return 0.42f;
-        if (key == "fb") return 0.42f;
-        if (key == "damp") return 2600.f;
-        if (key == "mix") return 0.3f;
-    } else if (profile == "void") {
-        if (key == "pitch_mix") return 0.45f;
-        if (key == "mix") return 0.5f;
-        if (key == "tone") return 1500.f;
-        if (key == "time") return 0.55f;
-        if (key == "fb") return 0.5f;
-        if (key == "damp") return 1800.f;
-    } else if (profile == "echo") {
-        if (key == "time") return 0.31f;
-        if (key == "fb") return 0.45f;
-        if (key == "damp") return 4200.f;
-        if (key == "mix") return 0.35f;
-        if (key == "lp") return 9000.f;
-    } else if (profile == "slash") {
-        if (key == "gain") return 0.55f;
-    }
+    for (int i = 0; i < ADV_SCHEMA_ROWS; i++)
+        if (profile == ADV_SCHEMA[i][0] && key == ADV_SCHEMA[i][1])
+            return adv_default(i);
     return 0.f;
+}
+
+// default output for an input: results/ (flat) or next to the input file
+inline std::string default_output_for(const std::string& inp, const std::string& tag,
+                                      const std::string& ext, bool next_to_input) {
+    std::string name = out_default(inp, tag, ext);
+    if (!next_to_input) return results_path(name);
+    std::string::size_type slash = inp.find_last_of("/\\");
+    std::string dir = (slash == std::string::npos) ? std::string(".") : inp.substr(0, slash);
+    if (dir.empty()) dir = ".";
+    return dir + "/" + name;
 }
 
 }  // namespace neon
