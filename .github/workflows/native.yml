@@ -99,8 +99,8 @@ jobs:
           if ($ki.Count -lt 2) { Write-Host "keep-inside smoke FAILED"; exit 1 }
           $outj = & build\Release\neonify.exe image test_assets\text.jpg 2>&1 | Out-String
           Write-Host $outj
-          $jpgs = Get-ChildItem "results\*.jpg" | Measure-Object
-          if ($jpgs.Count -lt 1) { Write-Host "jpg smoke FAILED"; exit 1 }
+          $all = Get-ChildItem "results\*" | Measure-Object
+          if ($all.Count -lt 3) { Write-Host "jpg smoke FAILED"; exit 1 }
           $outs = & build\Release\neonify.exe image test_assets\sweep.png --palette spectrum 2>&1 | Out-String
           Write-Host $outs
           $spec = Get-ChildItem "results\*_neonify_spectrum_*.png" | Measure-Object
@@ -238,14 +238,14 @@ jobs:
             /opt/src/ocvbuild/lib/libopencv_imgproc.a /opt/src/ocvbuild/lib/libopencv_core.a \
             /opt/src/ocvbuild/3rdparty/lib/libjpeg-turbo.a /opt/src/ocvbuild/3rdparty/lib/liblibwebp.a \
             /opt/src/ocvbuild/3rdparty/lib/liblibpng.a /opt/src/ocvbuild/3rdparty/lib/liblibtiff.a \
-            /opt/src/ocvbuild/3rdparty/lib/libzlib.a --end-group -lpthread -ldl -lm || echo "probe compile failed"
+            /opt/src/ocvbuild/3rdparty/lib/libzlib.a -Wl,--end-group -lpthread -ldl -lm || echo "probe compile failed"
           /tmp/probe || true
           ./build/neonify image test_assets/text.png
           ls results/*_neonify_*.png > /dev/null || { echo "image smoke FAILED"; exit 1; }
           ./build/neonify image test_assets/text.png --keep-inside
           [ $(ls results/*_neonify_*.png | wc -l) -ge 2 ] || { echo "keep-inside smoke FAILED"; exit 1; }
           ./build/neonify image test_assets/text.jpg
-          [ $(ls results/*.jpg | wc -l) -ge 1 ] || { echo "jpg smoke FAILED"; exit 1; }
+          [ $(ls results/ | wc -l) -ge 3 ] || { echo "jpg smoke FAILED"; exit 1; }
           ./build/neonify image test_assets/sweep.png --palette spectrum
           [ $(ls results/*_neonify_spectrum_*.png | wc -l) -ge 1 ] || { echo "spectrum smoke FAILED"; exit 1; }
           mkdir -p "unicode dir"

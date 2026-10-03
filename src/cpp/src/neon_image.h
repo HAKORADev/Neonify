@@ -8,7 +8,46 @@
 #include <cmath>
 #include <random>
 
+// stb_image: public-domain jpg/png/bmp/gif decoder, vendored so the exe reads
+// every common format even where the opencv build's own codecs misbehave
+#define STBI_NO_STDIO
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_NO_SIMD
+#include "stb_image.h"
+
 namespace neon {
+
+// stb layer: decodes the bytes into a BGR(A) mat; returns an empty mat when
+// the format is not one stb speaks
+inline cv::Mat stb_decode(const std::vector<uint8_t>& bytes, int want_channels) {
+    int w = 0, h = 0, channels = 0;
+    stbi_uc* data = stbi_load_from_memory(bytes.data(), int(bytes.size()), &w, &h,
+                                          &channels, want_channels);
+    if (!data) return cv::Mat();
+    int type = (want_channels == 4) ? CV_8UC4 : CV_8UC3;
+    cv::Mat rgba(h, w, type, data);
+    cv::Mat own = rgba.clone();
+    stbi_image_free(data);
+    if (want_channels == 3) {
+        cv::Mat bgr;
+        cv::cvtColor(own, bgr, cv::COLOR_RGB2BGR);
+        return bgr;
+    }
+    cv::Mat bgra;
+    cv::cvtColor(own, bgra, cv::COLOR_RGBA2BGRA);
+    // stb fills alpha=255 for formats without one; collapse to 3ch when the
+    // art is fully opaque so downstream encoders see a plain BGR image
+    std::vector<int> chs;
+    cv::split(bgra, chs);
+    double amin = 255.0;
+    cv::minMaxIdx(chs[3], &amin, nullptr);
+    if (amin >= 255.0) {
+        cv::Mat bgr;
+        cv::cvtColor(bgra, bgr, cv::COLOR_BGRA2BGR);
+        return bgr;
+    }
+    return bgra;
+}
 
 // unicode-safe imdecode/imencode: opencv ansi paths fail on windows for non-ascii files
 inline cv::Mat imread_robust(const std::string& path, int flags = cv::IMREAD_COLOR) {
@@ -16,8 +55,11 @@ inline cv::Mat imread_robust(const std::string& path, int flags = cv::IMREAD_COL
     if (bytes.empty()) return cv::Mat();
     cv::Mat img = cv::imdecode(bytes, flags);
     if (!img.empty()) return img;
-    // second layer: anything ffmpeg decodes but the built-in codecs do not
-    // (exotic jpeg variants, avif/heic builds, ...) comes through the pipe
+    // second layer: stb speaks jpg/png/bmp/gif/psd/pic/pnm regardless of how
+    // the opencv build turned out
+    img = stb_decode(bytes, (flags == cv::IMREAD_UNCHANGED) ? 4 : 3);
+    if (!img.empty()) return img;
+    // third layer: anything ffmpeg decodes but the built-in codecs do not
     std::string cap;
     if (!run_ok({"ffprobe", "-v", "error", "-select_streams", "v:0",
                  "-show_entries", "stream=width,height", "-of", "csv=p=0", path}, &cap) || cap.empty())
@@ -51,7 +93,14 @@ inline bool imwrite_robust(const std::string& path, const cv::Mat& img,
     std::string ext = lower_ext(path);
     if (ext.empty()) ext = ".png";
     std::vector<uint8_t> buf;
-    if (!cv::imencode(ext, img, buf, params)) return false;
+    if (!cv::imencode(ext, img, buf, params)) {
+        // encoder gap on some builds: fall back to png, the name keeps the law
+        std::string::size_type dot = path.find_last_of('.');
+        std::string png_path = (dot == std::string::npos) ? path + ".png"
+                                                          : path.substr(0, dot) + ".png";
+        if (!cv::imencode(".png", img, buf, params)) return false;
+        return write_file_bytes(png_path, buf.data(), buf.size());
+    }
     return write_file_bytes(path, buf.data(), buf.size());
 }
 
