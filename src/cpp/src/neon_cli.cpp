@@ -1,5 +1,6 @@
 // NEONIFY native — CLI entry. interactive mode is a 1:1 port of the old
 // python cli (sections, wording, ranges, order, messages).
+#define STB_IMAGE_IMPLEMENTATION_HERE
 #include "neon_common.h"
 #include "neon_image.h"
 #include "neon_audio.h"

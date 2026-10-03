@@ -9,10 +9,13 @@
 #include <random>
 
 // stb_image: public-domain jpg/png/bmp/gif decoder, vendored so the exe reads
-// every common format even where the opencv build's own codecs misbehave
+// every common format even where the opencv build's own codecs misbehave.
+// the implementation expands in the one TU that sets STB_IMAGE_IMPLEMENTATION_HERE
 #define STBI_NO_STDIO
-#define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_SIMD
+#ifdef STB_IMAGE_IMPLEMENTATION_HERE
+#define STB_IMAGE_IMPLEMENTATION
+#endif
 #include "stb_image.h"
 
 namespace neon {
