@@ -165,12 +165,13 @@ inline cv::Mat gaussian_blur(const cv::Mat& img, float sigma) {
 }
 
 // wide_blur law: sigma >= 12 goes through a quarter-scale round trip
+// (the temp is not named 'small' — windows.h defines small as a char macro)
 inline cv::Mat wide_blur(const cv::Mat& t, float sigma) {
     if (sigma >= 12.0f) {
-        cv::Mat small, out;
-        cv::resize(t, small, cv::Size(), 0.25, 0.25, cv::INTER_LINEAR);
-        small = gaussian_blur(small, sigma * 0.25f);
-        cv::resize(small, out, t.size(), 0, 0, cv::INTER_LINEAR);
+        cv::Mat ds, out;
+        cv::resize(t, ds, cv::Size(), 0.25, 0.25, cv::INTER_LINEAR);
+        ds = gaussian_blur(ds, sigma * 0.25f);
+        cv::resize(ds, out, t.size(), 0, 0, cv::INTER_LINEAR);
         return out;
     }
     return gaussian_blur(t, sigma);
@@ -178,11 +179,11 @@ inline cv::Mat wide_blur(const cv::Mat& t, float sigma) {
 
 inline cv::UMat wide_blur_gpu(const cv::UMat& t, float sigma) {
     if (sigma >= 12.0f) {
-        cv::UMat small, out;
-        cv::resize(t, small, cv::Size(), 0.25, 0.25, cv::INTER_LINEAR);
+        cv::UMat ds, out;
+        cv::resize(t, ds, cv::Size(), 0.25, 0.25, cv::INTER_LINEAR);
         int k = int(std::ceil(sigma * 0.25f * 3.0f)) * 2 + 1;
-        cv::GaussianBlur(small, small, cv::Size(k, k), sigma * 0.25f, sigma * 0.25f, cv::BORDER_CONSTANT);
-        cv::resize(small, out, t.size(), 0, 0, cv::INTER_LINEAR);
+        cv::GaussianBlur(ds, ds, cv::Size(k, k), sigma * 0.25f, sigma * 0.25f, cv::BORDER_CONSTANT);
+        cv::resize(ds, out, t.size(), 0, 0, cv::INTER_LINEAR);
         return out;
     }
     int k = int(std::ceil(sigma * 3.0f)) * 2 + 1;

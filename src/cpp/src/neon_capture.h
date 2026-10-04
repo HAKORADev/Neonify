@@ -31,6 +31,14 @@
 #include <sys/shm.h>
 #endif
 
+#ifdef NEONIFY_WITH_PORTAL
+// c headers stay outside the namespace — including them inside neon would
+// namespace their symbols and break the abi against the real libraries
+#include <systemd/sd-bus.h>
+#include <pipewire/pipewire.h>
+#include <spa/param/video/format-utils.h>
+#endif
+
 namespace neon {
 
 inline uint64_t now_us() {
@@ -326,10 +334,6 @@ private:
 
 #ifdef NEONIFY_WITH_PORTAL
 
-#include <systemd/sd-bus.h>
-#include <pipewire/pipewire.h>
-#include <spa/param/video/format-utils.h>
-
 // wayland capture: a screencast session through the desktop portal. the dance
 // is create-session -> select-sources -> start, each confirmed by a Response
 // signal on a per-call request path; then the fd pipewire gave the portal is
@@ -350,7 +354,7 @@ public:
         if (!portal_call("SelectSources", {{"types", "1"}, {"multiple", "false"}, {"cursor_mode", "1"}}, res))
             return fail();
         res.clear();
-        if (!portal_call("Start", {{"window", ""}}, res)) return fail();
+        if (!portal_call("Start", {}, res)) return fail();
         auto stit = res.find("node");
         if (stit == res.end()) return fail();
         node_id_ = uint32_t(std::stoul(stit->second));
@@ -379,17 +383,17 @@ public:
     }
 
     int width() const override {
-        std::lock_guard<std::mutex> lk(mtx_);
+        std::lock_guard<std::mutex> lk(latest_mtx_);
         return w_;
     }
     int height() const override {
-        std::lock_guard<std::mutex> lk(mtx_);
+        std::lock_guard<std::mutex> lk(latest_mtx_);
         return h_;
     }
     std::string name() const override { return "portal"; }
 
     bool grab(cv::Mat& bgr, uint64_t& ts_us) override {
-        std::lock_guard<std::mutex> lk(mtx_);
+        std::lock_guard<std::mutex> lk(latest_mtx_);
         if (latest_.empty()) return false;
         latest_.copyTo(bgr);
         ts_us = ts_.load();
@@ -397,6 +401,7 @@ public:
     }
 
 private:
+    mutable std::mutex latest_mtx_;   // const probes lock this too
     bool fail() {
         stop();
         return false;
@@ -407,7 +412,9 @@ private:
                      std::map<std::string, std::string>& out) {
         char token[64];
         std::snprintf(token, sizeof(token), "neonify%u", ++token_n_);
-        std::string sender = sd_bus_get_unique_name(bus_);
+        const char* uniq = nullptr;
+        if (sd_bus_get_unique_name(bus_, &uniq) < 0 || !uniq) return false;
+        std::string sender = uniq;
         for (char& c : sender)
             if (c == ':' || c == '.') c = '_';
         request_path_ = "/org/freedesktop/portal/desktop/request/" + sender + "/" + token;
@@ -419,6 +426,10 @@ private:
         auto append_args = [&](sd_bus_message* msg) -> bool {
             if (session_.empty() == false && std::string(method) != "CreateSession")
                 if (sd_bus_message_append_basic(msg, 'o', session_.c_str()) < 0) return false;
+            // Start carries a parent_window string between the session and the
+            // options — we are standalone, so an empty parent
+            if (std::string(method) == "Start")
+                if (sd_bus_message_append_basic(msg, 's', "") < 0) return false;
             if (sd_bus_message_open_container(msg, 'a', "{sv}") < 0) return false;
             for (const auto& kv : args) {
                 if (sd_bus_message_open_container(msg, 'e', "sv") < 0) return false;
@@ -521,7 +532,7 @@ private:
                 cv::Mat bgra(h, w, CV_8UC4, sb->datas[0].data, size_t(stride));
                 cv::Mat bgr;
                 cv::cvtColor(bgra, bgr, cv::COLOR_BGRA2BGR);
-                std::lock_guard<std::mutex> lk(self->mtx_);
+                std::lock_guard<std::mutex> lk(self->latest_mtx_);
                 bgr.copyTo(self->latest_);
                 self->ts_.store(now_us());
             }
@@ -534,7 +545,7 @@ private:
         if (param == nullptr || id != SPA_PARAM_Format) return;
         spa_video_info_raw fmt{};
         if (spa_format_video_raw_parse(param, &fmt) < 0) return;
-        std::lock_guard<std::mutex> lk(self->mtx_);
+        std::lock_guard<std::mutex> lk(self->latest_mtx_);
         self->w_ = int(fmt.size.width);
         self->h_ = int(fmt.size.height);
     }
@@ -552,7 +563,6 @@ private:
             return false;
         }
         pw_properties* props = pw_properties_new(nullptr, nullptr);
-        pw_properties_setf(props, PW_KEY_STREAM_CAPTURE_SINK, "true");
         stream_ = pw_stream_new(context_, "neonify-capture", props);
         if (!stream_) {
             pw_thread_loop_unlock(loop_);
@@ -576,7 +586,7 @@ private:
         const spa_pod* params[1];
         params[0] = spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
-            3, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+            SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
             SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
             SPA_FORMAT_VIDEO_format, SPA_POD_Id(SPA_VIDEO_FORMAT_BGRx));
         int flags = PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_AUTOCONNECT;
@@ -590,7 +600,7 @@ private:
         int64_t deadline = int64_t(now_us()) + 5000000;
         while (int64_t(now_us()) < deadline) {
             {
-                std::lock_guard<std::mutex> lk(mtx_);
+                std::lock_guard<std::mutex> lk(latest_mtx_);
                 if (w_ > 0 && h_ > 0) return true;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -635,7 +645,6 @@ private:
     pw_core* core_ = nullptr;
     pw_stream* stream_ = nullptr;
     spa_hook hooks_{};
-    std::mutex mtx_;
     cv::Mat latest_;
     std::atomic<uint64_t> ts_{0};
     int w_ = 0, h_ = 0;

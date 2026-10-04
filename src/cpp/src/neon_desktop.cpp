@@ -23,7 +23,9 @@
 #endif
 
 #include <csignal>
+#ifdef __linux__
 #include <execinfo.h>
+#endif
 
 #ifdef __linux__
 #include <X11/Xlib.h>
@@ -664,10 +666,16 @@ int main(int argc, char** argv) {
     neon::attach_parent_console(argc, argv);
     // a crash in the overlay must leave a name behind, not just vanish
     std::signal(SIGSEGV, [](int) {
+#ifdef __linux__
         void* frames[32];
         int n = backtrace(frames, 32);
         std::fprintf(stderr, "neonify-desktop crashed — backtrace:\n");
         backtrace_symbols_fd(frames, n, 2);
+#else
+        void* frames[32];
+        USHORT n = RtlCaptureStackBackTrace(0, 32, frames, nullptr);
+        std::fprintf(stderr, "neonify-desktop crashed — %d frames\n", (int)n);
+#endif
         std::_Exit(139);
     });
     return run_desktop(argc, argv);
