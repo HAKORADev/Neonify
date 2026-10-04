@@ -45,7 +45,7 @@ jobs:
       - name: neonify the clip
         run: |
           mkdir -p out
-          bin/neonify/neonify video "showcase/${{ inputs.clip }}" out/result.mp4 \
+          bin/neonify/neonify video "showcase/${{ inputs.clip }}" -o out/result.mp4 \
             ${{ inputs.args }}
           ls -la out
 
