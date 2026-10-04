@@ -607,7 +607,8 @@ private:
     class HotkeyFilter : public QAbstractNativeEventFilter {
     public:
         explicit HotkeyFilter(DesktopApp* app) : app_(app) {}
-        bool nativeEventFilter(const QByteArray&, void* message, qint64*) override {
+        // qt5 passes long* for the result (qt6 moved to qint64 — this build is qt5)
+        bool nativeEventFilter(const QByteArray&, void* message, long*) override {
             MSG* msg = static_cast<MSG*>(message);
             if (msg->message == WM_HOTKEY && msg->wParam == 1) {
                 QMetaObject::invokeMethod(app_, "toggle_chord", Qt::QueuedConnection);

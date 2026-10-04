@@ -563,7 +563,13 @@ private:
             return false;
         }
         pw_properties* props = pw_properties_new(nullptr, nullptr);
-        stream_ = pw_stream_new(context_, "neonify-capture", props);
+        core_ = pw_context_connect_fd(context_, ::dup(fd_), nullptr, 0);
+        if (!core_) {
+            pw_properties_free(props);
+            pw_thread_loop_unlock(loop_);
+            return false;
+        }
+        stream_ = pw_stream_new(core_, "neonify-capture", props);
         if (!stream_) {
             pw_thread_loop_unlock(loop_);
             return false;
@@ -576,19 +582,23 @@ private:
             return ev;
         }();
         pw_stream_add_listener(stream_, &hooks_, &events, this);
-        core_ = pw_context_connect_fd(context_, ::dup(fd_), nullptr, 0);
-        if (!core_) {
-            pw_thread_loop_unlock(loop_);
-            return false;
-        }
         uint8_t podbuf[1024];
         spa_pod_builder b = SPA_POD_BUILDER_INIT(podbuf, sizeof(podbuf));
-        const spa_pod* params[1];
-        params[0] = spa_pod_builder_add_object(
-            &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
-            SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
-            SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-            SPA_FORMAT_VIDEO_format, SPA_POD_Id(SPA_VIDEO_FORMAT_BGRx));
+        const spa_pod* params[1] = {nullptr};
+        {
+            // the primitives instead of the add_object sugar — that macro
+            // changed shape across pipewire versions, these calls did not
+            spa_pod_frame frame;
+            if (spa_pod_builder_push_object(&b, &frame, SPA_TYPE_OBJECT_Format,
+                                            SPA_PARAM_EnumFormat) >= 0) {
+                spa_pod_builder_add(&b,
+                                    SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+                                    SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+                                    SPA_FORMAT_VIDEO_format, SPA_POD_Id(SPA_VIDEO_FORMAT_BGRx),
+                                    0);
+                params[0] = (const spa_pod*)spa_pod_builder_pop(&b, &frame);
+            }
+        }
         int flags = PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_AUTOCONNECT;
         if (pw_stream_connect(stream_, PW_DIRECTION_INPUT, node_id_,
                               pw_stream_flags(flags), params, 1) < 0) {
