@@ -525,12 +525,18 @@ inline bool run_ok(const std::vector<std::string>& argv, std::string* capture = 
     HANDLE orr = nullptr, owr = nullptr;
     bool need = capture != nullptr;
     if (need && !CreatePipe(&orr, &owr, &sa, 0)) return false;
+    HANDLE nul = nullptr;
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput = HANDLE(_get_osfhandle(_fileno(stdin)));
     si.hStdOutput = need ? owr : HANDLE(_get_osfhandle(_fileno(stdout)));
-    si.hStdError = quiet_stderr ? nullptr : HANDLE(_get_osfhandle(_fileno(stderr)));
+    if (quiet_stderr) {
+        nul = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
+        si.hStdError = nul ? nul : HANDLE(_get_osfhandle(_fileno(stderr)));
+    } else {
+        si.hStdError = HANDLE(_get_osfhandle(_fileno(stderr)));
+    }
     std::string cmd;
     for (size_t i = 0; i < argv.size(); i++) {
         if (i) cmd += " ";
@@ -542,10 +548,9 @@ inline bool run_ok(const std::vector<std::string>& argv, std::string* capture = 
     std::vector<wchar_t> cmdv(wcmd.begin(), wcmd.end());
     cmdv.push_back(L'\0');
     PROCESS_INFORMATION pi{};
-    DWORD flags = CREATE_NO_WINDOW;
-    if (quiet_stderr) flags |= CREATE_DEFAULT_ERROR_MODE;
-    BOOL okf = CreateProcessW(nullptr, cmdv.data(), nullptr, nullptr, quiet_stderr ? FALSE : TRUE,
-                              flags, nullptr, nullptr, &si, &pi);
+    BOOL okf = CreateProcessW(nullptr, cmdv.data(), nullptr, nullptr, TRUE,
+                              CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    if (nul) CloseHandle(nul);
     if (owr) CloseHandle(owr);
     if (!okf) return false;
     WaitForSingleObject(pi.hProcess, INFINITE);
