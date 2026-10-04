@@ -569,13 +569,23 @@ inline void pid_kill(long pid) {
 #endif
 }
 
+// one lock for the whole registry: every op is a read-modify-write over the
+// same file, and decoder threads plus the main thread hit it concurrently
+// (compare mode runs two ffmpeg children at once)
+inline std::mutex& children_mtx() {
+    static std::mutex m;
+    return m;
+}
+
 inline void child_register(long owner, long child, const std::string& name) {
+    std::lock_guard<std::mutex> lk(children_mtx());
     std::ofstream f = open_ofstream(children_path(), std::ios::app);
     if (!f.good()) return;
     f << owner << " " << child << " " << name << "\n";
 }
 
 inline std::vector<std::string> child_lines() {
+    std::lock_guard<std::mutex> lk(children_mtx());
     std::vector<std::string> lines;
     std::ifstream f = open_ifstream(children_path());
     std::string line;
@@ -587,6 +597,7 @@ inline std::vector<std::string> child_lines() {
 }
 
 inline void child_write_lines(const std::vector<std::string>& lines) {
+    std::lock_guard<std::mutex> lk(children_mtx());
     std::ofstream f = open_ofstream(children_path(), std::ios::binary | std::ios::trunc);
     if (!f.good()) return;
     for (const std::string& l : lines) f << l << "\n";
