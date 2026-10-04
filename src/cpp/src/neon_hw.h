@@ -33,6 +33,7 @@ inline std::vector<IniField> ini_schema() {
         {"hardware", "gpu_ms", "bench: same ops on the gpu, milliseconds (0 when no gpu)", "0-100000", "0"},
         {"hardware", "video_encoder", "ffmpeg video encoder verified on this machine", "auto|libx264|h264_nvenc|h264_qsv|h264_amf|h264_vaapi", "auto"},
         {"hardware", "desktop_backend", "how the desktop neonifier captures the screen here", "none|dxgi|x11|portal", "none"},
+        {"hardware", "detected", "the probe finished and wrote the facts above; 0 means the next launch re-detects", "0|1", "0"},
 
         {"engine", "device", "where the neon math runs for images and videos", "auto|gpu|cpu", "auto"},
         {"engine", "gpu_min_pixels", "frames smaller than this stay on the cpu even in gpu mode", "int 0-16777216", "307200"},
@@ -218,23 +219,26 @@ inline IniFile load_app_ini() {
         // 'auto' stays a valid user choice that forces a fresh probe
         ini.set("hardware", "video_encoder", hw.video_encoder);
         ini.set("hardware", "desktop_backend", hw.desktop_backend);
+        ini.set("hardware", "detected", "1");
     };
     bool created = false;
     ini.load(schema, &created);
-    trace(created ? "ini: fresh — detecting hardware" : "ini: existing — keeping values");
-    if (created) {
+    bool undetected = !ini.get_bool("hardware", "detected", false);
+    trace(created ? "ini: fresh — detecting hardware"
+                  : (undetected ? "ini: detection never landed — re-detecting"
+                                : "ini: existing — keeping values"));
+    if (created || undetected) {
         try {
             detect();
         } catch (const std::exception& e) {
             // detection must never take the app down with it — the stored
-            // facts stay honest defaults and the user can delete the ini to
-            // retry fresh
+            // facts stay honest defaults and the next launch retries
             trace("ini: detection failed");
             std::fprintf(stderr, "[ini] hardware detection failed: %s\n", e.what());
         } catch (...) {
             trace("ini: detection failed");
         }
-        trace("ini: detection done — saving");
+        trace("ini: detection pass done — saving");
         ini.save(schema);  // the detection must survive this process
     }
     return ini;

@@ -106,7 +106,7 @@ jobs:
         shell: pwsh
         run: |
           cmd /c "set NEONIFY_TRACE=1&& build\Release\neonify.exe image test_assets\text.png > first_run.txt 2>&1"
-          Get-Content first_run.txt | Select-String -Pattern "trace|detection failed" | ForEach-Object { Write-Host $_ }
+          if (Test-Path "build\Release\neonify_trace.log") { Write-Host "--- trace file:"; Get-Content "build\Release\neonify_trace.log" | Select-Object -First 24 }
           $img = Get-Content first_run.txt -Raw
           if ($img -notmatch "Completed: 1/1") { Write-Host "image smoke FAILED"; exit 1 }
           if (-not (Test-Path "results\*_neonify_*.png")) { Write-Host "image smoke FAILED - no output"; exit 1 }
@@ -142,7 +142,7 @@ jobs:
             if (-not (Test-Path "results\*_neonify_*.wav")) { Write-Host "audio smoke FAILED - no output"; exit 1 }
           } else { Write-Host "ffmpeg not on runner - audio smoke skipped" }
           Write-Host "ini on disk:"
-          Get-Content build\Release\neonify.ini | Select-String -Pattern "^(gpu_name|video_encoder|desktop_backend|cpu_ms)="
+          Get-Content build\Release\neonify.ini | Select-String -Pattern "^(gpu_name|video_encoder|desktop_backend|cpu_ms|detected)="
           Write-Host "smoke OK"
 
       - name: desktop neonifier probe smoke

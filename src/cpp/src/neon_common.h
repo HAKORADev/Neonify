@@ -70,9 +70,15 @@ inline bool trace_enabled() {
 }
 
 inline void trace(const char* tag) {
-    if (trace_enabled()) {
-        std::fprintf(stderr, "[trace] %s\n", tag);
-        std::fflush(stderr);
+    if (!trace_enabled()) return;
+    std::fprintf(stderr, "[trace] %s\n", tag);
+    std::fflush(stderr);
+    // stderr can vanish under gui hosts and redirected runners — the file
+    // copy always lands next to the exe
+    static FILE* tf = std::fopen("neonify_trace.log", "a");
+    if (tf) {
+        std::fprintf(tf, "[trace] %s\n", tag);
+        std::fflush(tf);
     }
 }
 
