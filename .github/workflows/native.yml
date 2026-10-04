@@ -105,9 +105,10 @@ jobs:
       - name: smoke test (the real exe, image + audio + composite modes + ini)
         shell: pwsh
         run: |
-          $out = & cmd /c "set NEONIFY_TRACE=1&& build\Release\neonify.exe image test_assets\text.png" 2>&1 | Out-String
-          Write-Host $out
-          if ($out -match "\[trace\] ini:") { Write-Host "ini lifecycle traces captured" }
+          cmd /c "set NEONIFY_TRACE=1&& build\Release\neonify.exe image test_assets\text.png > first_run.txt 2>&1"
+          Get-Content first_run.txt | Select-String -Pattern "trace|detection failed" | ForEach-Object { Write-Host $_ }
+          $img = Get-Content first_run.txt -Raw
+          if ($img -notmatch "Completed: 1/1") { Write-Host "image smoke FAILED"; exit 1 }
           if (-not (Test-Path "results\*_neonify_*.png")) { Write-Host "image smoke FAILED - no output"; exit 1 }
           if (-not (Test-Path "build\Release\neonify.ini")) { Write-Host "ini smoke FAILED - no neonify.ini"; exit 1 }
           $ini = Get-Content build\Release\neonify.ini -Raw
