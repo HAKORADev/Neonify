@@ -25,6 +25,15 @@ jobs:
       - name: ffmpeg
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
 
+      - name: runtime libs the release binary links
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libx11-xcb1 libxcb-keysyms1 libxcb-image0 libxcb-icccm4 libxcb-render-util0 \
+            libxcb-xinerama0 libxcb-xkb1 libxcb-util1 libxkbcommon-x11-0 \
+            libglib2.0-0 libegl1 libgl1-mesa-dri libjpeg8 libicu70 \
+            libgstreamer-gl1.0-0 libgudev-1.0-0 || true
+
       - name: release binary
         run: |
           gh release download v0.5.0 --repo "$GITHUB_REPOSITORY" --pattern "neonify-linux-cpp-*.tar.gz" --dir bin

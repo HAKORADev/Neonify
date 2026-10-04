@@ -73,6 +73,25 @@ Without a command, `neonify` opens the GUI. `neonify cli` opens the interactive 
 | `--export-mesh` | off | relief runs also write the remeshed OBJ |
 | `--json-progress` | off | progress as JSON lines (for the GUI) |
 
+## Showcase
+
+Real runs of the release binary — every result below came out of the same package the releases ship, nothing mocked. Sources and outputs live in [showcase/](showcase).
+
+<p align="center">
+  <img src="showcase/image-original.jpg" alt="Original frame" width="45%"/>
+  <img src="showcase/image-neonify-electric.png" alt="Electric neonify" width="45%"/>
+</p>
+
+<p align="center">
+  <em>Image — Forza Horizon 6 in-game frame through <code>electric</code>: original (left), neonified (right)</em>
+</p>
+
+| | file | run |
+|---|---|---|
+| video | [video-original.mp4](showcase/video-original.mp4) → [video-neonify-electric-spatial-robotic.mp4](showcase/video-neonify-electric-spatial-robotic.mp4) | 20s of Forza Horizon 6 gameplay (stereo engine audio, no voiceover) through <code>electric</code> with spatial glow, the audio through <code>robotic</code> |
+| audio | [audio-original.mp3](showcase/audio-original.mp3) → [audio-neonify-echo-x4.wav](showcase/audio-neonify-echo-x4.wav) | a vocals-carrying NoCopyrightSounds track through <code>echo</code> at the new <code>extreme</code> intensity (the chain runs four times — the name carries the level) |
+| 3d | [mesh-original-orb.obj](showcase/mesh-original-orb.obj) → [mesh-neonify-electric-turntable.mp4](showcase/mesh-neonify-electric-turntable.mp4) · [mesh-neonify-fire-still.png](showcase/mesh-neonify-fire-still.png) | a generated orb — geodesic core, two rings, twelve icosahedral spikes, six pods — as a 48-frame electric 360° turntable and a fire still |
+
 ## Outputs
 
 Default outputs land in `results/`, named `name_neonify_effect_timestamp` — `photo_neonify_ice_261003152708.png`, `track_neonify_fire_261003153228.wav`, `clip_neonify_synthwave_261003154510.mp4`. The interactive CLI also offers a custom output path as a third location. Nothing ever overwrites.
