@@ -637,6 +637,12 @@ public:
         if (capture_out && !CreatePipe(&orr, &owr, &sa, 0)) return false;
         if (feed_in && !CreatePipe(&irr, &iwr, &sa, 0)) return false;
         if (capture_err && !CreatePipe(&errr, &errw, &sa, 0)) return false;
+        // the parent-side ends must not leak into the child: bInheritHandles
+        // copies every inheritable handle, and a child holding its own stdin
+        // WRITE end never sees EOF — the encoder waits for input forever
+        if (orr) SetHandleInformation(orr, HANDLE_FLAG_INHERIT, 0);
+        if (iwr) SetHandleInformation(iwr, HANDLE_FLAG_INHERIT, 0);
+        if (errr) SetHandleInformation(errr, HANDLE_FLAG_INHERIT, 0);
         STARTUPINFOW si{};
         si.cb = sizeof(si);
         si.dwFlags = STARTF_USESTDHANDLES;
