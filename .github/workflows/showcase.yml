@@ -1,0 +1,46 @@
+name: showcase
+
+on:
+  workflow_dispatch:
+    inputs:
+      clip:
+        description: 'input file under showcase_src/ to neonify (leave empty to skip)'
+        required: false
+        default: ''
+      args:
+        description: 'neonify cli args for the clip'
+        required: false
+        default: '--palette electric --neon-audio --profile robotic'
+
+permissions:
+  contents: read
+
+jobs:
+  video:
+    if: ${{ inputs.clip != '' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      - name: release binary
+        run: |
+          gh release download v0.5.0 --repo "$GITHUB_REPOSITORY" --pattern "neonify-linux-cpp-*.tar.gz" --dir bin
+          tar -xzf bin/neonify-linux-cpp-*.tar.gz -C bin
+          chmod +x bin/neonify/neonify
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: neonify the clip
+        run: |
+          mkdir -p out
+          bin/neonify/neonify video "showcase/${{ inputs.clip }}" out/result.mp4 \
+            ${{ inputs.args }}
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: showcase-video
+          path: out/result.mp4
