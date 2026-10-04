@@ -221,8 +221,10 @@ inline IniFile load_app_ini() {
     };
     bool created = false;
     ini.load(schema, &created);
+    trace(created ? "ini: fresh — detecting hardware" : "ini: existing — keeping values");
     if (created) {
         detect();
+        trace("ini: detection done — saving");
         ini.save(schema);  // the detection must survive this process
     }
     return ini;

@@ -139,6 +139,8 @@ jobs:
             Write-Host $out2
             if (-not (Test-Path "results\*_neonify_*.wav")) { Write-Host "audio smoke FAILED - no output"; exit 1 }
           } else { Write-Host "ffmpeg not on runner - audio smoke skipped" }
+          Write-Host "ini on disk:"
+          Get-Content build\Release\neonify.ini | Select-String -Pattern "^(gpu_name|video_encoder|desktop_backend|cpu_ms)="
           Write-Host "smoke OK"
 
       - name: desktop neonifier probe smoke
