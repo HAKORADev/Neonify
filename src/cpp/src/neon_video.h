@@ -140,9 +140,11 @@ inline std::pair<std::string, int> process_video_file(
         }
     }
     if (tracker && tracker->current < 1) tracker->complete_stage(0);
+    trace("video: audio stage done");
 
     std::string enc = resolved_video_encoder(app_ini());
     bool hw_decode = hwaccel || app_ini().get_bool("video", "hwdecode", false);
+    trace("video: probe ok");
 
     Proc rd;
     std::vector<std::string> rd_cmd = {"ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error"};
@@ -175,6 +177,7 @@ inline std::pair<std::string, int> process_video_file(
     cmd.push_back(raw_out);
     Proc wr;
     if (!wr.spawn(cmd, true, true, true)) throw std::runtime_error("cannot spawn ffmpeg writer");
+    trace("video: pipes up");
 
     std::atomic<long long> enc_ms{0};
     std::atomic<bool> enc_done{false};
@@ -192,6 +195,28 @@ inline std::pair<std::string, int> process_video_file(
     int64_t frame_no = 0;
     size_t frame_bytes = size_t(w) * h * 3;
     std::vector<unsigned char> buf(frame_bytes);
+    // the frame loop is the one spot without a bounded wait inside — fread
+    // blocks until the reader speaks. a watchdog thread watches activity and
+    // kills both children when nothing moves for 120s, so a frozen reader
+    // surfaces as an error instead of an eternal "compiling"
+    auto now_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    std::atomic<long long> last_act{now_ms()};
+    std::atomic<bool> wd_stop{false};
+    std::atomic<bool> wd_fired{false};
+    std::thread watchdog([&] {
+        while (!wd_stop.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::seconds(10));
+            if (wd_stop.load(std::memory_order_relaxed)) break;
+            if (now_ms() - last_act.load(std::memory_order_relaxed) > 120000) {
+                wd_fired = true;
+                rd.kill();
+                wr.kill();
+            }
+        }
+    });
     try {
         while (true) {
             size_t got = 0;
@@ -199,6 +224,7 @@ inline std::pair<std::string, int> process_video_file(
                 size_t n = std::fread(buf.data() + got, 1, frame_bytes - got, rd.out);
                 if (n == 0) break;
                 got += n;
+                last_act = now_ms();
             }
             if (got < frame_bytes) break;
             cv::Mat frame(h, w, CV_8UC3, buf.data());
@@ -227,11 +253,14 @@ inline std::pair<std::string, int> process_video_file(
                                          (tail.empty() ? out_path : tail));
             }
             frame_no++;
+            last_act = now_ms();
             if (tracker && frame_no % 5 == 0)
                 tracker->step(double(frame_no) / double(n_frames),
                               "frame " + std::to_string(frame_no) + "/" + std::to_string(n_frames));
         }
     } catch (...) {
+        wd_stop = true;
+        watchdog.join();
         rd.kill();
         wr.kill();
         if (rd.out) std::fclose(rd.out), rd.out = nullptr;
@@ -239,8 +268,14 @@ inline std::pair<std::string, int> process_video_file(
         drain.join();
         throw;
     }
+    wd_stop = true;
+    watchdog.join();
+    if (wd_fired)
+        throw std::runtime_error("video pipeline stalled (no activity for 120s) — children killed");
+    trace("video: frames done");
     if (rd.out) std::fclose(rd.out), rd.out = nullptr;
     rd.wait_close(15000);
+    trace("video: reader reaped");
     if (rd.exit_code != 0 && frame_no > 0)
         throw std::runtime_error("video reader failed mid-stream: " + rd.stderr_tail());
     std::fflush(wr.in);
@@ -248,6 +283,7 @@ inline std::pair<std::string, int> process_video_file(
     wr.in = nullptr;
 
     if (tracker) tracker->complete_stage(frame_stage);
+    trace("video: compile wait");
     if (tracker) {
         tracker->begin_stage(int(stages.size()) - 1, "compile");
         auto last_move = std::chrono::steady_clock::now();
@@ -276,6 +312,7 @@ inline std::pair<std::string, int> process_video_file(
         std::fclose(wr.out);
         wr.out = nullptr;
         wr.wait_close(30000);
+        trace("video: writer reaped");
         if (stalled)
             throw std::runtime_error("video encoder stalled and was killed: " +
                                      (wr.stderr_tail().empty() ? out_path : wr.stderr_tail()));

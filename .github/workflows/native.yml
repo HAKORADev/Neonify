@@ -103,9 +103,13 @@ jobs:
         run: choco install ffmpeg -y --no-progress | Out-Null
 
       - name: smoke test (the real exe, image + audio + composite modes + ini)
+        timeout-minutes: 20
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Continue"
+          Write-Host "== [1] first run + detection"
           cmd /c "set NEONIFY_TRACE=1&& build\Release\neonify.exe image test_assets\text.png > first_run.txt 2>&1"
+          Write-Host "== [1] exit code $LASTEXITCODE"
           if (Test-Path "build\Release\neonify_trace.log") { Write-Host "--- trace file:"; Get-Content "build\Release\neonify_trace.log" | Select-Object -First 24 }
           $img = Get-Content first_run.txt -Raw
           if ($img -notmatch "Completed: 1/1") { Write-Host "image smoke FAILED"; exit 1 }
@@ -114,42 +118,51 @@ jobs:
           $ini = Get-Content build\Release\neonify.ini -Raw
           if ($ini -notmatch "# valid:") { Write-Host "ini smoke FAILED - no comment law"; exit 1 }
           if ($ini -match "\[desktop\]") { Write-Host "ini smoke FAILED - desktop section still in schema"; exit 1 }
+          Write-Host "== [2] keep-inside"
           $outki = & build\Release\neonify.exe image test_assets\text.png --keep-inside 2>&1 | Out-String
           Write-Host $outki
+          Write-Host "== [3] global-glow"
           $outgl = & build\Release\neonify.exe image test_assets\text.png --global-glow 2>&1 | Out-String
           Write-Host $outgl
           $all = Get-ChildItem "results\*_neonify_*.png" | Measure-Object
           if ($all.Count -lt 3) { Write-Host "composite-mode smoke FAILED"; exit 1 }
+          Write-Host "== [4] jpg"
           $outj = & build\Release\neonify.exe image test_assets\text.jpg 2>&1 | Out-String
           Write-Host $outj
           $all = Get-ChildItem "results\*" | Measure-Object
           if ($all.Count -lt 4) { Write-Host "jpg smoke FAILED"; exit 1 }
+          Write-Host "== [5] spectrum"
           $outs = & build\Release\neonify.exe image test_assets\sweep.png --palette spectrum 2>&1 | Out-String
           Write-Host $outs
           $spec = Get-ChildItem "results\*_neonify_spectrum_*.png" | Measure-Object
           if ($spec.Count -lt 1) { Write-Host "spectrum smoke FAILED"; exit 1 }
+          Write-Host "== [6] synthwave"
           $outp = & build\Release\neonify.exe image test_assets\text.png --palette synthwave 2>&1 | Out-String
           Write-Host $outp
           $syn = Get-ChildItem "results\*_neonify_synthwave_*.png" | Measure-Object
           if ($syn.Count -lt 1) { Write-Host "palette smoke FAILED"; exit 1 }
+          Write-Host "== [7] unicode path"
           New-Item -ItemType Directory -Force -Path "unicode dir" | Out-Null
           Copy-Item test_assets\text.png "unicode dir\ñéo öü.png"
           $outu = & build\Release\neonify.exe image "unicode dir\ñéo öü.png" 2>&1 | Out-String
           Write-Host $outu
           $ff = Get-Command ffmpeg -ErrorAction SilentlyContinue
           if ($ff) {
+            Write-Host "== [8] audio"
             $out2 = & build\Release\neonify.exe audio test_assets\stereo.wav 2>&1 | Out-String
             Write-Host $out2
             if (-not (Test-Path "results\*_neonify_*.wav")) { Write-Host "audio smoke FAILED - no output"; exit 1 }
+            Write-Host "== [9] clip gen"
             ffmpeg -nostdin -y -f lavfi -i "testsrc=size=320x240:rate=25:duration=2" -c:v libx264 -preset ultrafast -pix_fmt yuv420p test_assets\reel.mp4 2> $null
+            Write-Host "== [10] video feedback"
             $vid = (& build\Release\neonify.exe video test_assets\reel.mp4 2>&1 | Out-String)
             Write-Host $vid
             if ($vid -notmatch "neonify frames") { Write-Host "video feedback smoke FAILED - no stage line"; exit 1 }
             if ($vid -notmatch "frame \d+/\d+") { Write-Host "video feedback smoke FAILED - no frame counters"; exit 1 }
             if (-not (Test-Path "results\*_neonify_electric_*.mp4")) { Write-Host "video smoke FAILED - no output"; exit 1 }
           } else { Write-Host "ffmpeg not on runner - audio smoke skipped" }
-          Write-Host "ini on disk:"
-          Get-Content build\Release\neonify.ini | Select-String -Pattern "^(gpu_name|video_encoder|cuda|cpu_ms|detected)="
+          Write-Host "== [11] ini on disk:"
+          Get-Content build\Release\neonify.ini | Select-String -Pattern "^(gpu_name|video_encoder|cuda|cuda_name|cpu_ms|gpu_ms|detected|hwdecode)="
           Write-Host "smoke OK"
 
       - name: collect portable bundle
@@ -242,6 +255,7 @@ jobs:
           cmake --build build -j "$(nproc)"
 
       - name: smoke test (the real binary, image + composite modes + ini + mesh + video feedback)
+        timeout-minutes: 20
         run: |
           command -v ffmpeg ffprobe || echo "no ffmpeg/ffprobe on runner"
           ./build/neonify image test_assets/text.png
@@ -273,6 +287,7 @@ jobs:
           echo "smoke OK"
 
       - name: gui startup smoke (xvfb, 8s alive)
+        timeout-minutes: 5
         run: |
           code=0
           timeout 8 xvfb-run -a ./build/neonify gui || code=$?
