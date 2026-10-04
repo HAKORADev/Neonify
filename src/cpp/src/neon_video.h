@@ -89,11 +89,18 @@ inline cv::Mat apply_spatial_shift(const cv::Mat& bloom, float dx, float dy, flo
     return out;
 }
 
+// the temp workspace dies with the run — success or any throw (cancel included)
+struct TmpGuard {
+    std::string path;
+    ~TmpGuard() { if (!path.empty()) remove_tree(path); }
+};
+
 inline std::pair<std::string, int> process_video_file(
         const std::string& inp, const std::string& out_path, const std::string& palette,
         float glow, float threshold, float env, const std::string& audio_profile,
         bool spatial_glow, bool neon_audio, const Advanced& advanced_audio,
-        StageTracker* tracker, int inside_mode = INSIDE_WIPE, bool hwaccel = false) {
+        StageTracker* tracker, int inside_mode = INSIDE_WIPE, bool hwaccel = false,
+        int audio_intensity = 1) {
     trace("video: enter");
     VideoInfo probe = probe_video(inp);
     trace("video: probed");
@@ -107,6 +114,7 @@ inline std::pair<std::string, int> process_video_file(
     }
     std::string tmp = "neonify_tmp_" + timestamp_suffix().substr(1);
     make_dir(tmp);
+    TmpGuard tmp_guard{tmp};
 
     bool has_audio = has_audio_stream(inp);
     bool will_neon_audio = has_audio && neon_audio && !audio_profile.empty();
@@ -131,10 +139,13 @@ inline std::pair<std::string, int> process_video_file(
             if (will_neon_audio) {
                 if (tracker) tracker->begin_stage(1, "neon audio");
                 auto on_step = [&](const std::string&, float frac) {
-                    if (tracker) tracker->step(frac);
+                    if (tracker) {
+                        tracker->check_cancel();
+                        tracker->step(frac);
+                    }
                 };
                 auto out = apply_audio_profile({al, ar}, AUDIO_SR, audio_profile, glow,
-                                               advanced_audio, on_step);
+                                               advanced_audio, on_step, nullptr, audio_intensity);
                 if (tracker) tracker->complete_stage(1);
                 audio_wav = tmp + "/neon_audio.wav";
                 write_wav_stereo(audio_wav, out.first, out.second);
@@ -221,6 +232,7 @@ inline std::pair<std::string, int> process_video_file(
     });
     try {
         while (true) {
+            if (tracker) tracker->check_cancel();
             size_t got = 0;
             while (got < frame_bytes) {
                 size_t n = std::fread(buf.data() + got, 1, frame_bytes - got, rd.out);
@@ -268,6 +280,7 @@ inline std::pair<std::string, int> process_video_file(
         if (rd.out) std::fclose(rd.out), rd.out = nullptr;
         if (wr.in) std::fclose(wr.in), wr.in = nullptr;
         drain.join();
+        remove_tree(tmp);  // belt and braces — the guard also fires
         throw;
     }
     wd_stop = true;
@@ -291,25 +304,37 @@ inline std::pair<std::string, int> process_video_file(
         auto last_move = std::chrono::steady_clock::now();
         long long last_ms = -1;
         bool stalled = false;
-        while (!enc_done) {
-            long long ms = enc_ms.load();
-            if (ms != last_ms) {
-                last_ms = ms;
-                last_move = std::chrono::steady_clock::now();
-            } else if (std::chrono::duration<double>(std::chrono::steady_clock::now() - last_move).count() > 90.0) {
-                // a wedged encoder never recovers — kill it so the drain
-                // thread sees EOF and this loop can leave
-                stalled = true;
-                wr.kill();
-                break;
+        // a cancel (or any throw) inside this loop must stop the encoder, join
+        // the drain thread and reap the child before unwinding — a joinable
+        // std::thread dying at scope exit would terminate the process
+        try {
+            while (!enc_done) {
+                if (tracker) tracker->check_cancel();
+                long long ms = enc_ms.load();
+                if (ms != last_ms) {
+                    last_ms = ms;
+                    last_move = std::chrono::steady_clock::now();
+                } else if (std::chrono::duration<double>(std::chrono::steady_clock::now() - last_move).count() > 90.0) {
+                    // a wedged encoder never recovers — kill it so the drain
+                    // thread sees EOF and this loop can leave
+                    stalled = true;
+                    wr.kill();
+                    break;
+                }
+                if (dur > 0 && ms > 0)
+                    tracker->step(std::min(1.0, (double(ms) / 1e6) / double(dur)), "compile");
+                std::this_thread::sleep_for(std::chrono::milliseconds(40));
             }
+            long long ms = enc_ms.load();
             if (dur > 0 && ms > 0)
                 tracker->step(std::min(1.0, (double(ms) / 1e6) / double(dur)), "compile");
-            std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        } catch (...) {
+            wr.kill();
+            if (drain.joinable()) drain.join();
+            if (wr.out) { std::fclose(wr.out); wr.out = nullptr; }
+            wr.wait_close(5000);
+            throw;
         }
-        long long ms = enc_ms.load();
-        if (dur > 0 && ms > 0)
-            tracker->step(std::min(1.0, (double(ms) / 1e6) / double(dur)), "compile");
         drain.join();
         std::fclose(wr.out);
         wr.out = nullptr;
@@ -341,6 +366,7 @@ inline std::pair<std::string, int> process_video_file(
         tracker->finish();
     }
     remove_tree(tmp);
+    tmp_guard.path.clear();  // success — the guard has nothing left to do
     return {finalp, int(frame_no)};
 }
 

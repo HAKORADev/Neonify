@@ -493,13 +493,16 @@ inline void process_image_neon(const cv::Mat& img_bgr, const std::string& palett
 }
 
 // keep law: only strong edges paint the neon — weak texture edges stay the
-// original pixels. edges^3 kills the per-pixel noise a photo is full of, the
-// tight halo hugs the tube, and everything the mask does not touch is the
-// original pixel exactly as it was. no global wash anywhere.
+// original pixels. the cube alone was not enough: a busy frame (game shot,
+// foliage) is full of 0.2-0.35 edges, and the blurred halo summed them into a
+// visible color wash over the whole region — the owner's "color layer on top
+// of the original". so the cube passes a hard floor first: edges below ~0.35
+// contribute exactly zero, before the halo blur can spread them. everything
+// the mask does not touch is the original pixel exactly as it was.
 inline cv::Mat keep_mask(const cv::Mat& edges) {
     cv::Mat strong;
     cv::pow(edges, 3.0f, strong);
-    strong = strong * 1.25f;
+    strong = (strong - 0.045f) * (1.0f / 0.955f);
     cv::min(cv::max(strong, 0.f), 1.f, strong);
     cv::Mat halo = wide_blur(strong, 2.6f) * 0.45f;
     cv::Mat m = strong * 1.1f + halo;
@@ -564,6 +567,7 @@ inline std::string neonize_image_file(const std::string& inp, const std::string&
     if (tracker) {
         tracker->set_stages({"edges", "bloom"});
         tracker->begin_stage(0);
+        tracker->check_cancel();
     }
     trace("engine: neon pass");
     EdgeAux aux;

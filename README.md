@@ -15,7 +15,7 @@
 
 Neonify turns images, videos, audio and 3D meshes into neon art. It runs locally on your machine, no accounts, no uploads.
 
-Images: edges become glowing tubes, PNG transparency follows the source art, and the original can sit under the effect three ways — wiped to black, kept with neon only on the edges, or kept under the full global glow. Videos: the same treatment per frame, with an option to run the audio through it too. Audio: seven profiles (fire, ice, robotic, ghost, void, echo, slash) that each react to the Glow setting. 3D: OBJ / PLY / STL rendered as neon wireframes, still or as a 360° turntable video, plus image-to-relief remeshing with OBJ export.
+Images: edges become glowing tubes, PNG transparency follows the source art, and the original can sit under the effect three ways — wiped to black, kept with neon only on the edges, or kept under the full global glow. Videos: the same treatment per frame, with an option to run the audio through it too. Audio: seven profiles (fire, ice, robotic, ghost, void, echo, slash) that each react to the Glow setting, plus an intensity level — normal, high (the chain runs twice), extreme (four times). 3D: OBJ / PLY / STL rendered as neon wireframes, still or as a 360° turntable video, plus image-to-relief remeshing with OBJ export.
 
 On first run the binary probes the machine once — graphics device, opencl, cuda through the nvidia driver, a real cpu/gpu benchmark, the video encoders ffmpeg can actually drive here, and a real hardware-decode pass — and writes `neonify.ini` next to the binary. Every value in that file carries two comment lines (what it is, what ranges are valid) and a checker repairs corrupt or extra entries back to defaults without touching the rest. Delete the file and the next run detects everything fresh.
 
@@ -63,6 +63,7 @@ Without a command, `neonify` opens the GUI. `neonify cli` opens the interactive 
 | `--keep-inside` | off | keep the original, neon only on the edges (images/videos) |
 | `--global-glow` | off | keep the original under the full global glow field |
 | `--profile` | `slash` | audio profile (audio mode, or video with `--neon-audio`) |
+| `--intensity <level>` | `normal` | audio profile strength: `normal`, `high` (x2), `extreme` (x4) — non-default levels show in the output name (`echo_x4`) |
 | `--neon-audio` | off | neonify the audio with the video |
 | `--no-spatial` | off | disable spatial glow (stereo pan) |
 | `--advanced-audio` | — | JSON overrides for profile parameters |

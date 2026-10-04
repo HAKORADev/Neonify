@@ -431,7 +431,8 @@ inline std::pair<std::string, std::string> tag_and_ext_for(const std::string& co
                                                            const Options& o) {
     std::string tag, ext;
     if (command == "audio") {
-        tag = o.profile.empty() ? "slash" : o.profile;
+        std::string prof = o.profile.empty() ? "slash" : o.profile;
+        tag = audio_tag(prof, o.audio_intensity);
         ext = ".wav";
     } else if (command == "mesh") {
         tag = std::string(o.palette) + "3d";
@@ -464,7 +465,7 @@ inline std::string run_one(const std::string& inp, const std::string& out_path,
         if (is_ext(inp, {".mp4", ".avi", ".mkv", ".mov", ".webm", ".gif"})) {
             auto r = process_video_file(inp, out_path, o.palette, o.glow, o.threshold, o.env,
                                         o.profile, o.spatial, o.neon_audio, o.advanced, tr,
-                                        o.inside_mode, o.hwaccel);
+                                        o.inside_mode, o.hwaccel, o.audio_intensity);
             return r.first;
         }
         EdgeAux aux;
@@ -473,7 +474,7 @@ inline std::string run_one(const std::string& inp, const std::string& out_path,
     }
     if (command == "audio") {
         std::string prof = o.profile.empty() ? "slash" : o.profile;
-        return neonize_audio_file(inp, out_path, prof, o.glow, o.advanced, tr);
+        return neonize_audio_file(inp, out_path, prof, o.glow, o.advanced, tr, o.audio_intensity);
     }
     if (command == "mesh") {
         if (!is_ext(inp, {".obj", ".ply", ".stl"}))
@@ -881,6 +882,7 @@ inline void print_usage() {
         "  --keep-inside            keep the original, neon only on the edges (images/videos)\n"
         "  --global-glow            keep the original under the full global glow field\n"
         "  --profile <name>         audio profile: fire ice robotic ghost void echo slash\n"
+        "  --intensity <level>      audio profile strength: normal, high (x2), extreme (x4)\n"
         "  --neon-audio             neonify the audio with the video\n"
         "  --no-spatial             disable spatial glow (stereo pan)\n"
         "  --advanced-audio <json>  override profile params, e.g. '{\"time\":0.4,\"fb\":0.5}'\n"
@@ -924,6 +926,7 @@ inline int run_cli(int argc, char** argv) {
         else if (a == "--keep-inside") o.inside_mode = 1;
         else if (a == "--global-glow") o.inside_mode = 2;
         else if (a == "--profile") o.profile = next_str("");
+        else if (a == "--intensity") o.audio_intensity = intensity_from_name(next_str("normal"));
         else if (a == "--neon-audio") o.neon_audio = true;
         else if (a == "--no-spatial") o.spatial = false;
         else if (a == "--hwaccel") o.hwaccel = true;

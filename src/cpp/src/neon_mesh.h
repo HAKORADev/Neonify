@@ -343,8 +343,11 @@ inline std::string neonize_mesh_file(const std::string& inp, const std::string& 
     std::string finalp = unique_output_path(out_path);
     if (turntable > 0) {
         auto cb = [&](int f) {
-            if (tracker) tracker->step(double(f) / double(turntable),
-                                       "frame " + std::to_string(f) + "/" + std::to_string(turntable));
+            if (tracker) {
+                tracker->check_cancel();
+                tracker->step(double(f) / double(turntable),
+                              "frame " + std::to_string(f) + "/" + std::to_string(turntable));
+            }
         };
         if (!render_turntable_pipe(finalp, mesh, turntable, azimuth, elevation, palette, glow, 30, 960, 720, cb))
             throw std::runtime_error("turntable encode failed");
@@ -382,8 +385,11 @@ inline std::string neonize_relief_file(const std::string& inp, const std::string
     std::string finalp = unique_output_path(out_path);
     if (turntable > 0) {
         auto cb = [&](int f) {
-            if (tracker) tracker->step(double(f) / double(turntable),
-                                       "frame " + std::to_string(f) + "/" + std::to_string(turntable));
+            if (tracker) {
+                tracker->check_cancel();
+                tracker->step(double(f) / double(turntable),
+                              "frame " + std::to_string(f) + "/" + std::to_string(turntable));
+            }
         };
         if (!render_turntable_pipe(finalp, mesh, turntable, azimuth, elevation, palette, glow, 24, 960, 720, cb))
             throw std::runtime_error("relief turntable encode failed");

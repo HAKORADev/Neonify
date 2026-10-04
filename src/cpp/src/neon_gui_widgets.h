@@ -508,7 +508,10 @@ public:
         bool resized = img.size() != media.size();
         media = img;
         if (!media.isNull()) message.clear();
-        if (resized || zoom_ <= 0) fit();
+        if (resized || zoom_ <= 0) {
+            fit_state_ = true;
+            fit();
+        }
         update();
     }
 
@@ -546,6 +549,7 @@ public:
     // the media point under widget_pos stays under widget_pos afterwards
     void zoom_to_point(QPointF widget_pos, double target) {
         if (media.isNull()) return;
+        fit_state_ = false;  // a manual zoom is the user's — resize keeps it
         double lo = std::max(0.01, std::min(fit_zoom() * 0.5, 1.0));
         double hi = max_zoom();
         target = std::max(lo, std::min(hi, target));
@@ -560,13 +564,17 @@ public:
 
     double zoom_factor() const { return zoom_; }
     QPointF view_offset() const { return offset_; }
+    bool fit_mode() const { return fit_state_; }
 
     // a synced pane takes the leader's zoom and pan verbatim (compare mode:
-    // both sides always look at the same spot); this path never re-emits
-    void follow_view(double zoom, QPointF off) {
+    // both sides always look at the same spot); this path never re-emits.
+    // the follower inherits the leader's fit-state so a later resize keeps
+    // both sides under the same law
+    void follow_view(double zoom, QPointF off, bool leader_fit_state = false) {
         if (media.isNull()) return;
         zoom_ = std::max(0.01, std::min(max_zoom(), zoom));
         offset_ = off;
+        fit_state_ = leader_fit_state;
         clamp_offset();
         update();
     }
@@ -627,9 +635,17 @@ protected:
     }
 
     void resizeEvent(QResizeEvent*) override {
-        if (zoom_ > 0 && !media.isNull()) {
-            clamp_offset();
-            update();
+        if (!media.isNull()) {
+            // the compare pages set their media before the stacked widget hands
+            // out real geometry — the first fit landed on a stale size and the
+            // image compare opened at the wrong scale. while the view is still
+            // in auto-fit (no manual zoom), every resize re-fits
+            if (fit_state_) {
+                fit();
+            } else {
+                clamp_offset();
+                update();
+            }
         }
     }
 
@@ -740,6 +756,7 @@ private slots:
 protected:
     QImage media;
     double zoom_ = 0.0;
+    bool fit_state_ = true;
     QPointF offset_;
     QPointF base_offset_;
     QPointF pan_target_;
@@ -1063,8 +1080,9 @@ private:
                 ring.push_back(own);
             }
         }
-        std::fclose(dec_proc.out);
-        dec_proc.out = nullptr;
+        // abandon (not wait_close): the gui thread's stop_decoder may be inside
+        // kill() right now — the FILE* swaps to nullptr under the same lock
+        dec_proc.abandon_out();
         dec_proc.wait_close(1000);
         dec_busy = false;
     }
@@ -1387,7 +1405,7 @@ public:
             connect(cv[i], &ZoomCanvas::view_changed, this, [this, i, zbar](double zoom) {
                 if (syncing_) return;
                 syncing_ = true;
-                cv[1 - i]->follow_view(zoom, cv[i]->view_offset());
+                cv[1 - i]->follow_view(zoom, cv[i]->view_offset(), cv[i]->fit_mode());
                 syncing_ = false;
                 zbar->reflect(zoom);
             });
@@ -1450,7 +1468,7 @@ public:
             connect(cv[i], &ZoomCanvas::view_changed, this, [this, i](double zoom) {
                 if (syncing_zoom) return;
                 syncing_zoom = true;
-                cv[1 - i]->follow_view(zoom, cv[i]->view_offset());
+                cv[1 - i]->follow_view(zoom, cv[i]->view_offset(), cv[i]->fit_mode());
                 syncing_zoom = false;
                 zbar->reflect(zoom);
             });

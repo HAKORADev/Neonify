@@ -3,6 +3,7 @@
 
 #include <opencv2/core.hpp>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -354,11 +355,19 @@ inline std::string lower_ext(const std::string& p) {
 
 // ---------------------------------------------------------------- progress
 // THE LAW: n/n counts COMPLETED steps; % moves inside the current step.
+// cooperative cancel: engines poll this and unwind with Cancelled so the gui
+// stop button kills a run between frames/steps instead of at file borders
+class Cancelled : public std::runtime_error {
+public:
+    Cancelled() : std::runtime_error("cancelled") {}
+};
+
 class StageTracker {
 public:
     bool enabled = true;
     bool json_mode = false;
     bool quiet = false;
+    std::atomic<bool>* cancel_ext = nullptr;
     std::function<void(const std::string&, double)> hook;
     std::vector<std::string> stages;
     int current = -1;
@@ -414,6 +423,12 @@ public:
         last_line.clear();
     }
 
+    bool cancelled() const { return cancel_ext && cancel_ext->load(); }
+
+    void check_cancel() const {
+        if (cancelled()) throw Cancelled();
+    }
+
     void finish() {
         if (enabled && !json_mode) {
             double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -459,6 +474,10 @@ private:
         last_line = s;
     }
 };
+
+inline void throw_if_cancelled(const StageTracker* tr) {
+    if (tr && tr->cancelled()) throw Cancelled();
+}
 
 // ---------------------------------------------------------------- exe dir
 // next to the binary: the ini, the trace log and the child registry live here
@@ -720,20 +739,34 @@ public:
 #endif
     }
 
+    // fclose out from the reader thread while a concurrent kill() may be in
+    // flight — the FILE* must swap to nullptr under the same lock kill() uses,
+    // or two threads can fclose one FILE* and take the heap down
+    void abandon_out() {
+        std::lock_guard<std::mutex> lk(lifecycle_);
+        if (out) {
+            std::fclose(out);
+            out = nullptr;
+        }
+    }
+
     // wait for the child, drain whatever is left of stdout, reap. timeout in
     // milliseconds, negative waits forever — on timeout the child is killed
     // and the wait finishes on the corpse, so no caller can hang here. the
     // wait itself happens outside the lock so a concurrent kill() (the gui
     // stopping a player decoder) lands immediately.
     int wait_close(int timeout_ms = -1) {
-        if (in) {
-            std::fclose(in);
-            in = nullptr;
-        }
-        if (out) {
-            drain_out_discard();
-            std::fclose(out);
-            out = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(lifecycle_);
+            if (in) {
+                std::fclose(in);
+                in = nullptr;
+            }
+            if (out) {
+                drain_out_discard();
+                std::fclose(out);
+                out = nullptr;
+            }
         }
 #ifdef _WIN32
         HANDLE h = nullptr;

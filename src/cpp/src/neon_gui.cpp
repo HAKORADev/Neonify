@@ -32,7 +32,9 @@ inline QString style_sheet() {
         "QPushButton:hover{background:#262626;border-color:#4a4a4a;}"
         "QPushButton:disabled{color:#555555;border-color:#242424;}"
         "QPushButton#accent{background:#e5e5e5;border:none;color:#111111;font-weight:bold;}"
-        "QPushButton#accent:hover{background:#ffffff;}"
+        "QPushButton#accent:hover:enabled{background:#ffffff;}"
+        "QPushButton#accent:pressed:enabled{background:#d0d0d0;}"
+        "QPushButton#accent:disabled{background:#2a2a2a;color:#5a5a5a;font-weight:bold;}"
         "QComboBox{background:#1d1d1d;color:#e5e5e5;border:1px solid #2f2f2f;border-radius:5px;padding:4px 8px;}"
         "QComboBox QAbstractItemView{background:#1d1d1d;color:#e5e5e5;selection-background-color:#3a3a3a;}"
         "QSlider::groove:horizontal{height:4px;background:#2f2f2f;border-radius:2px;}"
@@ -177,7 +179,7 @@ public:
         if (dot != std::string::npos) ext = inps.substr(dot);
         if (k == KImage) { tag = o.palette; ext = ".png"; }
         else if (k == KVideo) { tag = o.palette; ext = ".mp4"; }
-        else if (k == KAudio) { tag = o.profile.empty() ? std::string("slash") : o.profile; ext = ".wav"; }
+        else if (k == KAudio) { tag = neon::audio_tag(o.profile.empty() ? std::string("slash") : o.profile, o.audio_intensity); ext = ".wav"; }
         else if (k == KMesh || k == KRelief) { tag = o.palette + "3d"; ext = o.turntable > 0 ? ".mp4" : ".png"; }
         return QString::fromStdString(neon::default_output_for(inps, tag, ext, o.next_to_input));
     }
@@ -191,6 +193,7 @@ public:
             std::string out = make_output(q, k, opts).toStdString();
             neon::StageTracker tr(true, false);
             tr.quiet = true;
+            tr.cancel_ext = &stop_flag;
             tr.hook = [this](const std::string& label, double frac) {
                 emit progress_signal(QString::fromStdString(label), frac);
             };
@@ -202,10 +205,11 @@ public:
                     neon::process_video_file(inp, out, opts.palette, opts.glow, opts.threshold,
                                              opts.env, opts.profile, opts.spatial,
                                              opts.neon_audio, opts.advanced, &tr, opts.inside_mode,
-                                             opts.hwaccel);
+                                             opts.hwaccel, opts.audio_intensity);
                 } else if (k == KAudio) {
                     std::string prof = opts.profile.empty() ? "slash" : opts.profile;
-                    neon::neonize_audio_file(inp, out, prof, opts.glow, opts.advanced, &tr);
+                    neon::neonize_audio_file(inp, out, prof, opts.glow, opts.advanced, &tr,
+                                             opts.audio_intensity);
                 } else if (k == KMesh) {
                     neon::neonize_mesh_file(inp, out, opts.palette, opts.glow,
                                             opts.turntable, opts.azimuth, opts.elevation, &tr);
@@ -216,6 +220,8 @@ public:
                 }
                 tr.finish();
                 emit file_done(q, QString::fromStdString(out), int(k));
+            } catch (const neon::Cancelled&) {
+                break;  // the stop button — all_done reports it via cancel_requested_
             } catch (const std::exception& e) {
                 QString msg = QString::fromLocal8Bit(e.what());
                 if (msg.trimmed().isEmpty())
@@ -359,6 +365,7 @@ public:
     QWidget* aud_section = nullptr;
     QWidget* td_section = nullptr;
     QComboBox* profile_combo = nullptr;
+    QComboBox* intensity_combo = nullptr;
     QCheckBox* neon_audio = nullptr;
     QCheckBox* spatial = nullptr;
     QCheckBox* next_to_input = nullptr;
@@ -372,12 +379,14 @@ public:
     QCheckBox* export_mesh = nullptr;
 
     QPushButton* run_btn = nullptr;
+    QPushButton* cancel_btn = nullptr;
     TwoToneBar* bar = nullptr;
     QLabel* status = nullptr;
     ProcessingWorker* worker = nullptr;
     Preview3DWorker* prev3d = nullptr;
     int proc_done = 0;
     int failures_ = 0;
+    bool cancel_requested_ = false;
 
     NeonifyGUI() {
         setWindowTitle("Neonify");
@@ -411,17 +420,29 @@ public:
         run_btn->setObjectName("accent");
         run_btn->setEnabled(false);
         run_btn->setMinimumHeight(34);
+        cancel_btn = new QPushButton("Cancel");
+        cancel_btn->setEnabled(false);
+        cancel_btn->setMinimumHeight(34);
+        cancel_btn->hide();
         bar = new TwoToneBar;
         bar->set_range(0, 100);
         bar->set_value(0);
         status = new QLabel(QString());
         status->setStyleSheet("color:#888888;font-size:11px;");
         foot->addWidget(run_btn);
+        foot->addWidget(cancel_btn);
         foot->addWidget(bar, 1);
         foot->addWidget(status, 2);
         root->addLayout(foot);
 
         connect(run_btn, &QPushButton::clicked, this, &NeonifyGUI::start_processing);
+        connect(cancel_btn, &QPushButton::clicked, this, [this] {
+            if (!worker || !worker->isRunning()) return;
+            cancel_requested_ = true;
+            worker->stop_flag = true;
+            cancel_btn->setEnabled(false);
+            status->setText("cancelling\u2026");
+        });
         refresh_sections();
         refresh_run_enabled();
     }
@@ -592,6 +613,12 @@ public:
                                    QString::fromLatin1(neon::AUDIO_PROFILES[i]));
         profile_combo->setCurrentIndex(pc - 1);
         al->addWidget(profile_combo, 2);
+        al->addWidget(new QLabel("intensity", aud_section));
+        intensity_combo = new QComboBox(aud_section);
+        intensity_combo->addItem(QStringLiteral("normal"), 1);
+        intensity_combo->addItem(QStringLiteral("high (x2)"), 2);
+        intensity_combo->addItem(QStringLiteral("extreme (x4)"), 4);
+        al->addWidget(intensity_combo);
         neon_audio = new QCheckBox("neonify audio with video", aud_section);
         spatial = new QCheckBox("spatial glow", aud_section);
         spatial->setChecked(true);
@@ -867,6 +894,7 @@ public:
             o.profile = profile_combo->currentText().section(QStringLiteral(" —"), 0, 0).toStdString();
         o.spatial = spatial->isChecked();
         o.neon_audio = neon_audio->isChecked();
+        o.audio_intensity = intensity_combo->currentData().toInt();
         o.inside_mode = inside_combo->currentData().toInt();
         o.advanced.params = advanced;
         o.turntable = turn_combo->currentData().toInt();
@@ -877,6 +905,9 @@ public:
         o.next_to_input = next_to_input->isChecked();
 
         run_btn->setEnabled(false);
+        cancel_btn->setEnabled(true);
+        cancel_btn->show();
+        cancel_requested_ = false;
         bar->set_value(0);
         bar->set_display(QString());
         proc_done = 0;
@@ -903,15 +934,24 @@ public:
             status->setText(QStringLiteral("failed (%1): %2").arg(n_fail).arg(msg));
         });
         connect(worker, &ProcessingWorker::all_done, this, [this] {
-            bar->set_value(100);
             bar->set_display(QString());
-            QString done = next_to_input->isChecked()
-                               ? QStringLiteral("done — outputs next to the inputs")
-                               : QStringLiteral("done — outputs in results/");
+            QString done;
+            if (cancel_requested_) {
+                cancel_requested_ = false;
+                bar->set_value(0);
+                done = QStringLiteral("cancelled — partial outputs stay in place");
+            } else {
+                bar->set_value(100);
+                done = next_to_input->isChecked()
+                           ? QStringLiteral("done — outputs next to the inputs")
+                           : QStringLiteral("done — outputs in results/");
+            }
             if (failures_ > 0) done += QStringLiteral(" — %1 failed").arg(failures_);
             status->setText(done);
             failures_ = 0;
             run_btn->setEnabled(true);
+            cancel_btn->hide();
+            cancel_btn->setEnabled(false);
         });
         // the worker deletes itself, so the member must forget it in the same
         // breath — a stale pointer here is the crash behind reprocessing and

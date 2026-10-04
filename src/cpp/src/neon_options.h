@@ -16,6 +16,7 @@ struct Options {
     std::string profile;
     bool spatial = true;
     bool neon_audio = false;
+    int audio_intensity = 1;  // 1 normal, 2 high (x2), 4 extreme (x4)
     Advanced advanced;
     int turntable = 0;
     float azimuth = 30.0f;
@@ -33,6 +34,20 @@ inline const char* PROFILE_DESCRIPTIONS(const std::string& p) {
     if (p == "void") return "the abyss — octave-down, huge dark space";
     if (p == "echo") return "proper clean ping-pong echo, tone-shaped";
     return "the signature diagonal energy sweep";
+}
+
+// the audio naming law: the tag carries the real applied profile — and when
+// the intensity left normal, the file says so: echo_x2, echo_x4
+inline int intensity_from_name(const std::string& word) {
+    if (word == "high" || word == "x2" || word == "2") return 2;
+    if (word == "extreme" || word == "x4" || word == "4") return 4;
+    return 1;
+}
+
+inline std::string audio_tag(const std::string& profile, int intensity) {
+    if (intensity >= 4) return profile + "_x4";
+    if (intensity == 2 || intensity == 3) return profile + "_x2";
+    return profile;
 }
 
 // 1:1 with python AUDIO_ADVANCED_SCHEMA: profile, key, label, lo, hi, default

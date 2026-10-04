@@ -445,19 +445,24 @@ struct Advanced {
 inline Stereo apply_audio_profile(const Stereo& in, int sr, const std::string& profile,
                                   float glow, const Advanced& advanced,
                                   const std::function<void(const std::string&, float)>& on_step,
-                                  std::vector<std::string>* steps_done = nullptr) {
+                                  std::vector<std::string>* steps_done = nullptr,
+                                  int intensity = 1) {
     float g = std::min(3.0f, std::max(0.1f, glow));
     const Advanced& adv = advanced;
-    struct Step { std::string name; std::function<Stereo()> fn; };
+    // the chain law 1:1 with the python reference: every step consumes the
+    // previous step's output (l, r = fn() rebinding). the first cpp port let
+    // every lambda capture the raw input, so only the last step of a profile
+    // was ever audible — the "less effective" sound the owner heard.
+    struct Step { std::string name; std::function<Stereo(const Stereo&)> fn; };
     std::vector<Step> chain;
 
     if (profile == "fire") {
-        chain.push_back({"heat drive", [&] { return fx_tube_drive(in, sr, adv.get("drive", 0.3f + 0.22f * std::min(g, 2.f))); }});
-        chain.push_back({"flicker", [&] { return fx_tremolo(in, sr, adv.get("flicker_rate", 5.5f), std::min(0.14f + 0.05f * g, 0.5f)); }});
-        chain.push_back({"crackle", [&] {
+        chain.push_back({"heat drive", [&](const Stereo& s) { return fx_tube_drive(s, sr, adv.get("drive", 0.3f + 0.22f * std::min(g, 2.f))); }});
+        chain.push_back({"flicker", [&](const Stereo& s) { return fx_tremolo(s, sr, adv.get("flicker_rate", 5.5f), std::min(0.14f + 0.05f * g, 0.5f)); }});
+        chain.push_back({"crackle", [&](const Stereo& s) {
             std::mt19937_64 rng1(261002), rng2(726100);
             std::uniform_real_distribution<float> uni(0.f, 1.f);
-            size_t n = in.first.size();
+            size_t n = s.first.size();
             std::vector<float> b1(n), b2(n);
             for (size_t i = 0; i < n; i++) {
                 b1[i] = (uni(rng1) < (0.00008f * (1 + g)) ? 1.f : 0.f) * 6.f;
@@ -466,23 +471,23 @@ inline Stereo apply_audio_profile(const Stereo& in, int sr, const std::string& p
             float lv = adv.get("crackle", 0.5f);
             auto c1 = lowpass(b1, 3800, sr);
             auto c2 = lowpass(b2, 3800, sr);
-            Stereo out = in;
+            Stereo out = s;
             for (size_t i = 0; i < n; i++) {
                 out.first[i] += c1[i] * lv;
                 out.second[i] += c2[i] * lv;
             }
             return out;
         }});
-        chain.push_back({"rumble", [&] {
+        chain.push_back({"rumble", [&](const Stereo& s) {
             std::mt19937_64 rng1(112233), rng2(332211);
             std::normal_distribution<float> gauss(0.f, 1.f);
-            size_t n = in.first.size();
+            size_t n = s.first.size();
             std::vector<float> w1(n), w2(n);
             for (size_t i = 0; i < n; i++) { w1[i] = gauss(rng1); w2[i] = gauss(rng2); }
             float hz = adv.get("rumble_hz", 90.f), lv = adv.get("rumble", 0.6f);
             auto r1 = lowpass(w1, hz, sr);
             auto r2 = lowpass(w2, hz, sr);
-            Stereo out = in;
+            Stereo out = s;
             for (size_t i = 0; i < n; i++) {
                 out.first[i] += r1[i] * lv;
                 out.second[i] += r2[i] * lv;
@@ -490,47 +495,54 @@ inline Stereo apply_audio_profile(const Stereo& in, int sr, const std::string& p
             return out;
         }});
     } else if (profile == "ice") {
-        chain.push_back({"shimmer", [&] { return fx_ice_shimmer(in, sr, adv.get("shimmer_mix", 0.28f + 0.1f * std::min(g, 2.f))); }});
-        chain.push_back({"glass breath", [&] { return fx_vibrato(in, sr, adv.get("breath_rate", 0.5f), adv.get("breath_depth", 3.5f)); }});
-        chain.push_back({"frost echo", [&] { return fx_pingpong_echo(in, sr, adv.get("time", 0.19f), adv.get("fb", 0.3f), adv.get("damp", 7000.f), adv.get("mix", 0.2f + 0.06f * g)); }});
+        chain.push_back({"shimmer", [&](const Stereo& s) { return fx_ice_shimmer(s, sr, adv.get("shimmer_mix", 0.28f + 0.1f * std::min(g, 2.f))); }});
+        chain.push_back({"glass breath", [&](const Stereo& s) { return fx_vibrato(s, sr, adv.get("breath_rate", 0.5f), adv.get("breath_depth", 3.5f)); }});
+        chain.push_back({"frost echo", [&](const Stereo& s) { return fx_pingpong_echo(s, sr, adv.get("time", 0.19f), adv.get("fb", 0.3f), adv.get("damp", 7000.f), adv.get("mix", 0.2f + 0.06f * g)); }});
     } else if (profile == "robotic") {
-        chain.push_back({"ring mod", [&] { return fx_ring_mod(in, sr, adv.get("ring_hz", 88.f), adv.get("ring_mix", 0.6f)); }});
-        chain.push_back({"formant combs", [&] {
+        chain.push_back({"ring mod", [&](const Stereo& s) { return fx_ring_mod(s, sr, adv.get("ring_hz", 88.f), adv.get("ring_mix", 0.6f)); }});
+        chain.push_back({"formant combs", [&](const Stereo& s) {
             int d1 = std::max(1, int(0.021f * sr));
             int d2 = std::max(1, int(0.037f * sr));
             float comb = adv.get("comb", 0.45f);
             Stereo out;
-            out.first.resize(in.first.size());
-            out.second.resize(in.second.size());
-            for (size_t i = 0; i < in.first.size(); i++)
-                out.first[i] = in.first[i] - (i >= size_t(d1) ? in.first[i - d1] : 0.f) * comb;
-            for (size_t i = 0; i < in.second.size(); i++)
-                out.second[i] = in.second[i] - (i >= size_t(d2) ? in.second[i - d2] : 0.f) * comb;
+            out.first.resize(s.first.size());
+            out.second.resize(s.second.size());
+            for (size_t i = 0; i < s.first.size(); i++)
+                out.first[i] = s.first[i] - (i >= size_t(d1) ? s.first[i - d1] : 0.f) * comb;
+            for (size_t i = 0; i < s.second.size(); i++)
+                out.second[i] = s.second[i] - (i >= size_t(d2) ? s.second[i - d2] : 0.f) * comb;
             return out;
         }});
-        chain.push_back({"crush", [&] { return fx_crush(in, sr, adv.get("bits", 10.f)); }});
+        chain.push_back({"crush", [&](const Stereo& s) { return fx_crush(s, sr, adv.get("bits", 10.f)); }});
     } else if (profile == "ghost") {
-        chain.push_back({"fog reverb", [&] { return fx_ghost_fog(in, sr, adv.get("fog_mix", 0.42f + 0.08f * g)); }});
-        chain.push_back({"whisper detune", [&] { return fx_vibrato(in, sr, adv.get("whisper_rate", 0.37f), adv.get("whisper_depth", 5.f)); }});
-        chain.push_back({"far echo", [&] { return fx_pingpong_echo(in, sr, adv.get("time", 0.42f), adv.get("fb", 0.42f), adv.get("damp", 2600.f), adv.get("mix", 0.3f)); }});
+        chain.push_back({"fog reverb", [&](const Stereo& s) { return fx_ghost_fog(s, sr, adv.get("fog_mix", 0.42f + 0.08f * g)); }});
+        chain.push_back({"whisper detune", [&](const Stereo& s) { return fx_vibrato(s, sr, adv.get("whisper_rate", 0.37f), adv.get("whisper_depth", 5.f)); }});
+        chain.push_back({"far echo", [&](const Stereo& s) { return fx_pingpong_echo(s, sr, adv.get("time", 0.42f), adv.get("fb", 0.42f), adv.get("damp", 2600.f), adv.get("mix", 0.3f)); }});
     } else if (profile == "void") {
-        chain.push_back({"descent", [&] { return fx_void_pitch(in, sr, adv.get("pitch_mix", 0.45f)); }});
-        chain.push_back({"abyss reverb", [&] { return fx_void_reverb(in, sr, adv.get("mix", 0.4f + 0.08f * g), adv.get("tone", 1500.f)); }});
-        chain.push_back({"cave echo", [&] { return fx_pingpong_echo(in, sr, adv.get("time", 0.55f), adv.get("fb", 0.5f), adv.get("damp", 1800.f), adv.get("mix", 0.3f)); }});
+        chain.push_back({"descent", [&](const Stereo& s) { return fx_void_pitch(s, sr, adv.get("pitch_mix", 0.45f)); }});
+        chain.push_back({"abyss reverb", [&](const Stereo& s) { return fx_void_reverb(s, sr, adv.get("mix", 0.4f + 0.08f * g), adv.get("tone", 1500.f)); }});
+        chain.push_back({"cave echo", [&](const Stereo& s) { return fx_pingpong_echo(s, sr, adv.get("time", 0.55f), adv.get("fb", 0.5f), adv.get("damp", 1800.f), adv.get("mix", 0.3f)); }});
     } else if (profile == "echo") {
-        chain.push_back({"ping-pong", [&] { return fx_pingpong_echo(in, sr, adv.get("time", 0.31f), adv.get("fb", 0.45f), adv.get("damp", 4200.f), adv.get("mix", 0.35f)); }});
-        chain.push_back({"tone", [&] { return Stereo{lowpass(in.first, adv.get("lp", 9000.f), sr), lowpass(in.second, adv.get("lp", 9000.f), sr)}; }});
+        chain.push_back({"ping-pong", [&](const Stereo& s) { return fx_pingpong_echo(s, sr, adv.get("time", 0.31f), adv.get("fb", 0.45f), adv.get("damp", 4200.f), adv.get("mix", 0.35f)); }});
+        chain.push_back({"tone", [&](const Stereo& s) { return Stereo{lowpass(s.first, adv.get("lp", 9000.f), sr), lowpass(s.second, adv.get("lp", 9000.f), sr)}; }});
     } else {
-        chain.push_back({"slash sweep", [&] { return fx_slash_sweep(in, sr, adv.get("gain", 0.4f + 0.15f * g)); }});
+        chain.push_back({"slash sweep", [&](const Stereo& s) { return fx_slash_sweep(s, sr, adv.get("gain", 0.4f + 0.15f * g)); }});
     }
 
+    // intensity law: normal = the tuned chain once; high = x2; extreme = x4.
+    // the chain literally runs again on its own output, so echoes multiply,
+    // drives deepen and every profile compounds exactly the way the levels
+    // promise — normal stays 1:1 with the reference.
     Stereo cur = in;
+    int passes = std::max(1, std::min(4, intensity));
     int total = int(chain.size());
-    for (int i = 0; i < total; i++) {
-        if (on_step) on_step(chain[i].name, float(i) / float(total));
-        cur = chain[i].fn();
-        if (steps_done) steps_done->push_back(chain[i].name);
-        if (on_step) on_step(chain[i].name, float(i + 1) / float(total));
+    for (int pass = 0; pass < passes; pass++) {
+        for (int i = 0; i < total; i++) {
+            if (on_step) on_step(chain[i].name, float(pass * total + i) / float(total * passes));
+            cur = chain[i].fn(cur);
+            if (steps_done) steps_done->push_back(chain[i].name);
+            if (on_step) on_step(chain[i].name, float(pass * total + i + 1) / float(total * passes));
+        }
     }
     normalize_pair(cur.first, cur.second);
     return cur;
@@ -627,7 +639,8 @@ inline std::vector<std::pair<float, float>> spatial_energy_map(const std::vector
 
 inline std::string neonize_audio_file(const std::string& inp, const std::string& out_path,
                                       const std::string& profile, float glow,
-                                      const Advanced& advanced, StageTracker* tracker) {
+                                      const Advanced& advanced, StageTracker* tracker,
+                                      int intensity = 1) {
     std::vector<float> l, r;
     if (!decode_audio_stereo(inp, l, r)) throw std::runtime_error("cannot decode audio: " + inp);
     if (tracker) {
@@ -639,9 +652,12 @@ inline std::string neonize_audio_file(const std::string& inp, const std::string&
     }
     Stereo in{l, r};
     auto on_step = [&](const std::string&, float frac) {
-        if (tracker) tracker->step(frac);
+        if (tracker) {
+            tracker->check_cancel();
+            tracker->step(frac);
+        }
     };
-    auto out = apply_audio_profile(in, AUDIO_SR, profile, glow, advanced, on_step);
+    auto out = apply_audio_profile(in, AUDIO_SR, profile, glow, advanced, on_step, nullptr, intensity);
     if (tracker) {
         tracker->complete_stage(1);
         tracker->begin_stage(2, "mastering");
