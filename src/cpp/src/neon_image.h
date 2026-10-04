@@ -531,7 +531,14 @@ inline void keep_inside_composite(cv::Mat& neon_out, const cv::Mat& orig_bgr,
     cv::Mat orig32, out32;
     orig_bgr.convertTo(orig32, CV_32F);
     neon_out.convertTo(out32, CV_32F);
-    cv::Mat mixed = orig32.mul(1.0 - m3) + out32.mul(m3);
+    // the double-literal form `1.0 - m3` is an opencv expression pitfall — a
+    // lone double widens to Scalar(1,0,0), so channels 1 and 2 come back as
+    // -v instead of 1-v (measured) and the whole original drowns under the
+    // neon layer as a flat color wash. Mat::ones on CV_32FC3 carries the same
+    // Scalar(1,0,0) trap. Scalar::all(1) is the form that actually subtracts
+    // element-wise on every channel.
+    cv::Mat inv3 = cv::Scalar::all(1.0) - m3;
+    cv::Mat mixed = orig32.mul(inv3) + out32.mul(m3);
     mixed.convertTo(neon_out, CV_8U);
 }
 
