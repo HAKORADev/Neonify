@@ -9,6 +9,7 @@
 #include "neon_options.h"
 
 #include <cstring>
+#include <csignal>
 #include <thread>
 
 #ifdef _WIN32
@@ -312,12 +313,14 @@ public:
         std::printf("============================================================\n\n");
     }
 
-    // one file: engine stages drive the old-style bar; errors are inline and counted
+    // one file: engine stages drive the old-style bar; errors are inline and counted.
+    // the tracker runs enabled + quiet — its hook draws the line here; a disabled
+    // tracker never draws at all, which is exactly the silence this replaced
     template <typename F>
     void run_file(int idx, const std::string& inp, const std::string& out_path, F&& f) {
         std::string disp = base_name(inp);
         if (disp.size() > 25) disp = disp.substr(0, 22) + "...";
-        StageTracker tr(false);
+        StageTracker tr(true);
         tr.quiet = true;
         auto t_start = std::chrono::steady_clock::now();
         bool is_image = is_ext(inp, {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"});
@@ -497,6 +500,10 @@ inline std::vector<std::string> process_pairs(const std::vector<std::pair<std::s
         });
     }
     batch.footer();
+    if (!batch.outputs.empty()) {
+        std::printf("\nGenerated files:\n");
+        for (const auto& outp : batch.outputs) std::printf("  %s\n", outp.c_str());
+    }
     return batch.outputs;
 }
 
@@ -1050,6 +1057,12 @@ inline int run_cli(int argc, char** argv) {
 }  // namespace neon
 
 int main(int argc, char** argv) {
+#ifndef _WIN32
+    // a child dying mid-write must surface as an error, never kill the app
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
+    // ffmpeg/ffprobe left stalled by a past crash or freeze get their kill now
+    neon::sweep_orphan_children();
     neon::attach_parent_console(argc, argv);
     return neon::run_cli(argc, argv);
 }

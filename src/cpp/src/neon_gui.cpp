@@ -47,9 +47,6 @@ inline QString style_sheet() {
         "QScrollArea>QWidget>QWidget{background:transparent;}"
         "QScrollBar:vertical{background:#121212;width:10px;}"
         "QScrollBar::handle:vertical{background:#3a3a3a;border-radius:4px;min-height:24px;}"
-        "QProgressBar{background:#121212;border:1px solid #242424;border-radius:5px;"
-        "color:#e5e5e5;text-align:center;height:16px;}"
-        "QProgressBar::chunk{background:#e5e5e5;border-radius:4px;}"
         "QMessageBox{background:#161616;}"
         "QDialog{background:#161616;}"
         "QDoubleSpinBox{background:#1d1d1d;color:#e5e5e5;border:1px solid #2f2f2f;border-radius:4px;padding:3px;}"
@@ -375,7 +372,7 @@ public:
     QCheckBox* export_mesh = nullptr;
 
     QPushButton* run_btn = nullptr;
-    QProgressBar* bar = nullptr;
+    TwoToneBar* bar = nullptr;
     QLabel* status = nullptr;
     ProcessingWorker* worker = nullptr;
     Preview3DWorker* prev3d = nullptr;
@@ -414,8 +411,9 @@ public:
         run_btn->setObjectName("accent");
         run_btn->setEnabled(false);
         run_btn->setMinimumHeight(34);
-        bar = new QProgressBar;
-        bar->setValue(0);
+        bar = new TwoToneBar;
+        bar->set_range(0, 100);
+        bar->set_value(0);
         status = new QLabel(QString());
         status->setStyleSheet("color:#888888;font-size:11px;");
         foot->addWidget(run_btn);
@@ -441,118 +439,7 @@ public:
         l->addWidget(logo);
         l->addWidget(title);
         l->addStretch();
-        QPushButton* desk_btn = new QPushButton("Desktop neonifier…", h);
-        desk_btn->setStyleSheet("QPushButton{background:#1d1d1d;color:#cccccc;border:1px solid #2f2f2f;"
-                                "border-radius:5px;padding:5px 12px;font-size:12px;}"
-                                "QPushButton:hover{color:#ffffff;border-color:#4a4a4a;}");
-        connect(desk_btn, &QPushButton::clicked, this, &NeonifyGUI::open_desktop_neonifier);
-        l->addWidget(desk_btn);
         return h;
-    }
-
-    // the desktop neonifier settings live in the shared neonify.ini next to
-    // the binary — this dialog edits exactly that file, the overlay process
-    // picks the values up on its next start
-    void open_desktop_neonifier() {
-        QDialog dlg(this);
-        dlg.setWindowTitle("Desktop neonifier");
-        dlg.setMinimumWidth(460);
-        QVBoxLayout* lay = new QVBoxLayout(&dlg);
-        neon::IniFile ini = neon::app_ini();
-        std::vector<neon::IniField> schema = neon::ini_schema();
-        ini.load(schema);
-
-        QLabel* info = new QLabel(
-            QStringLiteral("live overlay over the desktop or the focused window — ctrl+alt+n toggles, "
-                           "ctrl+alt+n then w neonifies the focused window. backend: %1")
-                .arg(QString::fromStdString(ini.get("hardware", "desktop_backend", "none"))), &dlg);
-        info->setWordWrap(true);
-        info->setStyleSheet("color:#888888;font-size:11px;");
-        lay->addWidget(info);
-
-        auto add_row = [&](const char* label_text) -> QComboBox* {
-            QHBoxLayout* r = new QHBoxLayout;
-            r->addWidget(new QLabel(QLatin1String(label_text), &dlg));
-            QComboBox* c = new QComboBox(&dlg);
-            r->addWidget(c, 1);
-            lay->addLayout(r);
-            return c;
-        };
-        QComboBox* mode = add_row("mode");
-        mode->addItem(QStringLiteral("whole desktop"), "desktop");
-        mode->addItem(QStringLiteral("focused window"), "window");
-        mode->setCurrentIndex(mode->findData(QString::fromStdString(ini.get("desktop", "mode", "desktop"))));
-        QComboBox* monitor = add_row("monitor");
-        monitor->addItem(QStringLiteral("primary"), "primary");
-        for (int i = 1; i <= 6; i++) monitor->addItem(QString::number(i), QString::number(i));
-        monitor->setCurrentIndex(monitor->findData(QString::fromStdString(ini.get("desktop", "monitor", "primary"))));
-        if (monitor->currentIndex() < 0) monitor->setCurrentIndex(0);
-        QComboBox* device = add_row("device");
-        device->addItem(QStringLiteral("auto"), "auto");
-        device->addItem(QStringLiteral("gpu"), "gpu");
-        device->addItem(QStringLiteral("cpu"), "cpu");
-        device->setCurrentIndex(device->findData(QString::fromStdString(ini.get("desktop", "device", "auto"))));
-        QComboBox* palette = add_row("palette");
-        for (const char* p : neon::PALETTE_NAMES) palette->addItem(QString::fromLatin1(p));
-        palette->setCurrentText(QString::fromStdString(ini.get("desktop", "palette", "electric")));
-        QComboBox* inside = add_row("original under the effect");
-        inside->addItem(QStringLiteral("wipe — neon on black"), "wipe");
-        inside->addItem(QStringLiteral("keep original, neon only on the edges"), "keep");
-        inside->addItem(QStringLiteral("keep original + global neon glow"), "glow");
-        inside->setCurrentIndex(inside->findData(QString::fromStdString(ini.get("desktop", "inside", "wipe"))));
-
-        auto add_spin = [&](const char* label_text, double lo, double hi, double val, int dec) {
-            QHBoxLayout* r = new QHBoxLayout;
-            r->addWidget(new QLabel(QLatin1String(label_text), &dlg));
-            QDoubleSpinBox* sp = new QDoubleSpinBox(&dlg);
-            sp->setRange(lo, hi);
-            sp->setDecimals(dec);
-            sp->setSingleStep((hi - lo) / 100.0);
-            sp->setValue(val);
-            r->addWidget(sp, 1);
-            lay->addLayout(r);
-            return sp;
-        };
-        QDoubleSpinBox* glow = add_spin("glow", 0.2, 3.0, ini.get_float("desktop", "glow", 1.0f), 2);
-        QDoubleSpinBox* thr = add_spin("edge threshold", 0.02, 0.5, ini.get_float("desktop", "threshold", 0.12f), 3);
-        QDoubleSpinBox* env = add_spin("ambient detail", 0.0, 2.0, ini.get_float("desktop", "env", 1.0f), 2);
-        QDoubleSpinBox* fps = add_spin("fps cap", 5, 60, ini.get_int("desktop", "fps", 30), 0);
-        QDoubleSpinBox* scale = add_spin("process scale", 0.25, 1.0, ini.get_float("desktop", "scale", 1.0f), 2);
-        QCheckBox* hot = new QCheckBox(QStringLiteral("ctrl+alt+n hotkeys active"), &dlg);
-        hot->setChecked(ini.get_bool("desktop", "hotkeys", true));
-        lay->addWidget(hot);
-
-        QDialogButtonBox* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
-        lay->addWidget(bb);
-        connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-        connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-        if (dlg.exec() != QDialog::Accepted) return;
-
-        auto setv = [&](const char* k, const std::string& v) { ini.set("desktop", k, v); };
-        setv("mode", mode->currentData().toString().toStdString());
-        setv("monitor", monitor->currentData().toString().toStdString());
-        setv("device", device->currentData().toString().toStdString());
-        setv("palette", palette->currentText().toStdString());
-        setv("inside", inside->currentData().toString().toStdString());
-        setv("glow", std::to_string(glow->value()));
-        setv("threshold", std::to_string(thr->value()));
-        setv("env", std::to_string(env->value()));
-        setv("fps", std::to_string(int(fps->value())));
-        setv("scale", std::to_string(scale->value()));
-        setv("hotkeys", hot->isChecked() ? "1" : "0");
-        ini.save(schema);
-        status->setText(QStringLiteral("desktop neonifier settings saved to neonify.ini"));
-
-        QString bin = QCoreApplication::applicationDirPath() + "/neonify-desktop";
-#ifdef Q_OS_WIN
-        bin += ".exe";
-#endif
-        if (QFile::exists(bin)) {
-            QProcess::startDetached(bin, QStringList());
-            status->setText(QStringLiteral("desktop neonifier running — check the tray icon"));
-        } else {
-            status->setText(QStringLiteral("settings saved — the overlay binary ships next to this app"));
-        }
     }
 
     QWidget* build_inputs_panel() {
@@ -939,9 +826,9 @@ public:
             center->setCurrentWidget(vcmp);
             return;
         }
-        QPixmap a, b;
-        if (has_orig) a = QPixmap::fromImage(load_image_robust(in));
-        b = QPixmap::fromImage(load_image_robust(out));
+        QImage a, b;
+        if (has_orig) a = load_image_robust(in);
+        b = load_image_robust(out);
         if (b.isNull()) {
             status->setText(QStringLiteral("cannot open result: %1").arg(QFileInfo(out).fileName()));
             return;
@@ -990,14 +877,17 @@ public:
         o.next_to_input = next_to_input->isChecked();
 
         run_btn->setEnabled(false);
-        bar->setValue(0);
+        bar->set_value(0);
+        bar->set_display(QString());
         proc_done = 0;
 
         worker = new ProcessingWorker(this);
         worker->inputs = files;
         worker->opts = o;
         connect(worker, &ProcessingWorker::progress_signal, this, [this](const QString& label, double frac) {
-            bar->setValue(int(frac * 100));
+            bar->set_value(int(frac * 100));
+            // the tracker's counters (frame 240/1200) land inside the bar
+            bar->set_display(label.startsWith("frame ") ? label.mid(6) : QString());
             status->setText(label);
         });
         connect(worker, &ProcessingWorker::file_done, this, [this](const QString& in, const QString& out, int kind) {
@@ -1013,7 +903,8 @@ public:
             status->setText(QStringLiteral("failed (%1): %2").arg(n_fail).arg(msg));
         });
         connect(worker, &ProcessingWorker::all_done, this, [this] {
-            bar->setValue(100);
+            bar->set_value(100);
+            bar->set_display(QString());
             QString done = next_to_input->isChecked()
                                ? QStringLiteral("done — outputs next to the inputs")
                                : QStringLiteral("done — outputs in results/");

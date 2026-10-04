@@ -12,6 +12,7 @@
 #include <QLabel>
 #include <QPixmap>
 #include <QImage>
+#include <QFontMetrics>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QPushButton>
@@ -52,6 +53,78 @@ inline QColor C_LINE()    { return QColor(0x2a, 0x2a, 0x2a); }
 inline QColor C_TEXT()    { return QColor(0xe5, 0xe5, 0xe5); }
 inline QColor C_DIM()     { return QColor(0x66, 0x66, 0x66); }
 
+// ---------------------------------------------------------------- two-tone progress
+// the fill is white and the label is white, so the label used to vanish
+// wherever the fill crossed it. the overlap is computed here: the label is
+// drawn twice, clipped against the fill's rect it turns black, on the rest
+// it stays white. a plain QWidget on purpose — QProgressBar stylesheet rules
+// must not reach this paint.
+class TwoToneBar : public QWidget {
+    Q_OBJECT
+
+public:
+    TwoToneBar(QWidget* parent = nullptr) : QWidget(parent) {
+        setFixedHeight(16);
+        setMinimumWidth(80);
+    }
+
+    void set_range(int lo, int hi) { lo_ = lo; hi_ = hi; val_ = lo; update(); }
+    void set_value(int v) {
+        val_ = std::max(lo_, std::min(hi_, v));
+        update();
+    }
+    void set_display(const QString& t) {
+        display_ = t;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        QRectF r = rect().adjusted(0.5, 0.5, -1.5, -1.5);
+        p.setPen(QColor(0x24, 0x24, 0x24));
+        p.setBrush(QColor(0x12, 0x12, 0x12));
+        p.drawRoundedRect(r, 5, 5);
+        double frac = (hi_ > lo_) ? double(val_ - lo_) / double(hi_ - lo_) : 0.0;
+        QRectF chunk;
+        if (frac > 0.0) {
+            chunk = r.adjusted(1, 1, -1, -1);
+            chunk.setWidth(std::max(chunk.width() * frac, chunk.height()));
+            p.setPen(Qt::NoPen);
+            p.setBrush(QColor(0xe5, 0xe5, 0xe5));
+            p.drawRoundedRect(chunk, 4, 4);
+        }
+        QString t = display_;
+        if (t.isEmpty()) t = QString::number(int(std::round(frac * 100.0))) + "%";
+        QFontMetrics fm(font());
+        QRectF tr((width() - (tw_ = fm.horizontalAdvance(t))) / 2.0,
+                  (height() - fm.height()) / 2.0, tw_ + 2, fm.height());
+        p.setFont(font());
+        if (frac > 0.0 && chunk.isValid()) {
+            // where the label crosses the white fill: black
+            p.setPen(QColor(0x11, 0x11, 0x11));
+            p.setClipRect(chunk);
+            p.drawText(tr, Qt::AlignCenter, t);
+            // everywhere else on the label: white
+            QRegion outside(tr.toRect());
+            outside = outside.subtracted(QRegion(chunk.toRect()));
+            p.setClipRegion(outside);
+            p.setPen(QColor(0xe5, 0xe5, 0xe5));
+            p.drawText(tr, Qt::AlignCenter, t);
+            p.setClipping(false);
+        } else {
+            p.setPen(QColor(0xe5, 0xe5, 0xe5));
+            p.drawText(tr, Qt::AlignCenter, t);
+        }
+    }
+
+private:
+    int lo_ = 0, hi_ = 100, val_ = 0;
+    int tw_ = 0;
+    QString display_;
+};
+
 // ---------------------------------------------------------------- image decode
 // the engine reads images with opencv — the gui previews do the same, so the
 // gui can open exactly what the engine opens (jpg included, static qt has no
@@ -82,9 +155,9 @@ inline QByteArray decode_pcm_bytes(const QString& path, int sr, int ch, const ch
     QByteArray all;
     if (!QFile::exists(path)) return all;
     neon::Proc p;
-    if (!p.spawn({"ffmpeg", "-v", "error", "-i", path.toUtf8().constData(),
+    if (!p.spawn({"ffmpeg", "-nostdin", "-v", "error", "-i", path.toUtf8().constData(),
                   "-ac", std::to_string(ch), "-ar", std::to_string(sr), "-f", fmt, "-"},
-                 true, false))
+                 true, false, true))
         return all;
     char buf[65536];
     size_t n;
@@ -463,6 +536,7 @@ public:
         center_media();
         update();
         emit zoom_changed(zoom_pct());
+        emit view_changed(zoom_);
     }
 
     void set_zoom_pct(double pct) {
@@ -481,10 +555,25 @@ public:
         clamp_offset();
         update();
         emit zoom_changed(zoom_pct());
+        emit view_changed(zoom_);
+    }
+
+    double zoom_factor() const { return zoom_; }
+    QPointF view_offset() const { return offset_; }
+
+    // a synced pane takes the leader's zoom and pan verbatim (compare mode:
+    // both sides always look at the same spot); this path never re-emits
+    void follow_view(double zoom, QPointF off) {
+        if (media.isNull()) return;
+        zoom_ = std::max(0.01, std::min(max_zoom(), zoom));
+        offset_ = off;
+        clamp_offset();
+        update();
     }
 
 signals:
     void zoom_changed(double pct);
+    void view_changed(double zoom);
 
 protected:
     QRectF media_rect() const {
@@ -552,6 +641,7 @@ protected:
         } else {
             pan_target_ += QPointF(0.0, -double(e->angleDelta().y()) * 0.6);
             glide();
+            emit view_changed(zoom_);
         }
     }
 
@@ -602,6 +692,7 @@ protected:
             offset_ += d;
             clamp_offset();
             update();
+            emit view_changed(zoom_);
         }
     }
 
@@ -635,6 +726,7 @@ private slots:
             offset_ = next;
             clamp_offset();
             moved = true;
+            emit view_changed(zoom_);
         }
         if (!moved) {
             anim->stop();
@@ -701,6 +793,12 @@ public:
         });
         connect(fit_btn, &QPushButton::clicked, this, [this] { canvas->fit(); });
         connect(orig_btn, &QPushButton::clicked, this, [this] { canvas->set_zoom_pct(100.0); });
+    }
+
+    // compare views drive the label from a follower canvas too (the follower
+    // path carries the zoom factor, not the percentage)
+    void reflect(double factor) {
+        label->setText(QString::number(int(factor * 100.0 + 0.5)) + "%");
     }
 
 private:
@@ -855,6 +953,11 @@ private:
     std::deque<QImage> ring;
     std::atomic<bool> stop_flag{false};
     std::atomic<bool> dec_busy{false};
+    // the decoder's children live here, not on the thread's stack, so a stop
+    // can kill them from outside — a blocked fread or wait wakes with EOF and
+    // the join below returns in milliseconds instead of freezing the gui
+    neon::Proc dec_proc;
+    neon::Proc grab_proc;
 
     void stop_decoder() {
         {
@@ -865,6 +968,8 @@ private:
             stop_flag = true;
         }
         cv_full.notify_all();
+        dec_proc.kill();
+        grab_proc.kill();
         if (dec.joinable()) dec.join();
         stop_flag = false;
         dec_busy = false;
@@ -903,21 +1008,20 @@ private:
         double sec = double(frame_no) / fps();
         char ss[32];
         std::snprintf(ss, sizeof(ss), "%.3f", sec);
-        neon::Proc p;
-        if (!p.spawn({"ffmpeg", "-hide_banner", "-loglevel", "error",
-                      "-ss", ss, "-i", path.toUtf8().constData(),
-                      "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"},
-                     true, false))
+        if (!grab_proc.spawn({"ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                              "-ss", ss, "-i", path.toUtf8().constData(),
+                              "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"},
+                             true, false, true))
             return QImage();
         size_t need = size_t(info.w) * size_t(info.h) * 3;
         std::vector<unsigned char> buf(need);
         size_t got = 0;
         while (got < need) {
-            size_t n = std::fread(buf.data() + got, 1, need - got, p.out);
+            size_t n = std::fread(buf.data() + got, 1, need - got, grab_proc.out);
             if (n == 0) break;
             got += n;
         }
-        p.wait_close();
+        grab_proc.wait_close(5000);
         if (got < need) return QImage();
         QImage img(buf.data(), info.w, info.h, int(info.w * 3), QImage::Format_BGR888);
         return img.copy();
@@ -926,15 +1030,14 @@ private:
     void decode_loop(double start_sec) {
         char ss[32];
         std::snprintf(ss, sizeof(ss), "%.3f", std::max(0.0, start_sec));
-        std::vector<std::string> av = {"ffmpeg", "-hide_banner", "-loglevel", "error"};
+        std::vector<std::string> av = {"ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error"};
         if (start_sec > 0.01) av.push_back("-ss"), av.push_back(ss);
         av.push_back("-i");
         av.push_back(path.toUtf8().constData());
         av.push_back("-f"); av.push_back("rawvideo");
         av.push_back("-pix_fmt"); av.push_back("bgr24");
         av.push_back("-");
-        neon::Proc p;
-        if (!p.spawn(av, true, false)) {
+        if (!dec_proc.spawn(av, true, false, true)) {
             QMetaObject::invokeMethod(this, [this] { emit decode_failed(QStringLiteral("cannot spawn ffmpeg")); },
                                       Qt::QueuedConnection);
             dec_busy = false;
@@ -946,7 +1049,7 @@ private:
         while (!stop_flag) {
             size_t got = 0;
             while (got < need) {
-                size_t n = std::fread(buf.data() + got, 1, need - got, p.out);
+                size_t n = std::fread(buf.data() + got, 1, need - got, dec_proc.out);
                 if (n == 0) break;
                 got += n;
             }
@@ -960,9 +1063,9 @@ private:
                 ring.push_back(own);
             }
         }
-        std::fclose(p.out);
-        p.out = nullptr;
-        p.wait_close();
+        std::fclose(dec_proc.out);
+        dec_proc.out = nullptr;
+        dec_proc.wait_close(1000);
         dec_busy = false;
     }
 };
@@ -1248,46 +1351,60 @@ public:
 };
 
 // ---------------------------------------------------------------- side by side
+// the image compare lives under the same zoom law as the single preview:
+// two canvases, one zoom bar, and whichever pane the user moves, the other
+// follows — both sides always show the same spot at the same magnification
 class SideBySideView : public QWidget {
 public:
-    QPixmap before, after;
-    QString before_name, after_name;
+    ZoomCanvas* cv[2] = {nullptr, nullptr};
+    QLabel* names[2] = {nullptr, nullptr};
 
     SideBySideView(QWidget* parent = nullptr) : QWidget(parent) {
-        setMinimumSize(320, 240);
+        QVBoxLayout* root = new QVBoxLayout(this);
+        root->setContentsMargins(0, 0, 0, 0);
+        root->setSpacing(2);
+        QHBoxLayout* tops = new QHBoxLayout;
+        tops->setSpacing(1);
+        for (int i = 0; i < 2; i++) {
+            QWidget* side = new QWidget(this);
+            QVBoxLayout* sl = new QVBoxLayout(side);
+            sl->setContentsMargins(0, 0, 0, 0);
+            sl->setSpacing(0);
+            names[i] = new QLabel(i == 0 ? QStringLiteral("original") : QStringLiteral("result"), side);
+            names[i]->setAlignment(Qt::AlignCenter);
+            names[i]->setStyleSheet("color:#e5e5e5;background:#161616;font-size:11px;padding:2px;");
+            cv[i] = new ZoomCanvas(side);
+            sl->addWidget(names[i]);
+            sl->addWidget(cv[i], 1);
+            tops->addWidget(side);
+        }
+        root->addLayout(tops, 1);
+        ZoomBar* zbar = new ZoomBar(this);
+        zbar->setFixedHeight(28);
+        zbar->bind(cv[0]);
+        root->addWidget(zbar);
+        for (int i = 0; i < 2; i++) {
+            connect(cv[i], &ZoomCanvas::view_changed, this, [this, i, zbar](double zoom) {
+                if (syncing_) return;
+                syncing_ = true;
+                cv[1 - i]->follow_view(zoom, cv[i]->view_offset());
+                syncing_ = false;
+                zbar->reflect(zoom);
+            });
+        }
     }
 
-    void set_pair(const QPixmap& b, const QString& bn, const QPixmap& a, const QString& an) {
-        before = b; before_name = bn;
-        after = a; after_name = an;
-        update();
+    void set_pair(const QImage& b, const QString& bn, const QImage& a, const QString& an) {
+        cv[0]->set_media(b);
+        cv[0]->message = b.isNull() ? QStringLiteral("original removed") : QString();
+        cv[1]->set_media(a);
+        cv[1]->message = a.isNull() ? QStringLiteral("no result") : QString();
+        names[0]->setText(bn);
+        names[1]->setText(an);
     }
 
-    QRect scaled_rect(const QPixmap& pm, const QRect& area) const {
-        if (pm.isNull()) return QRect();
-        QSize s = pm.size().scaled(area.size(), Qt::KeepAspectRatio);
-        int x = area.x() + (area.width() - s.width()) / 2;
-        int y = area.y() + (area.height() - s.height()) / 2;
-        return QRect(x, y, s.width(), s.height());
-    }
-
-    void paintEvent(QPaintEvent*) override {
-        QPainter p(this);
-        p.setRenderHint(QPainter::SmoothPixmapTransform);
-        p.fillRect(rect(), QColor(0x0a, 0x0a, 0x0a));
-        int half = width() / 2;
-        p.setPen(QPen(C_LINE(), 1));
-        p.drawLine(half, 0, half, height());
-        QRect L(0, 20, half, height() - 20), R(half, 20, width() - half, height() - 20);
-        if (!before.isNull()) p.drawPixmap(scaled_rect(before, L), before);
-        else { p.setPen(C_DIM()); p.drawText(L, Qt::AlignCenter, "original removed"); }
-        if (!after.isNull()) p.drawPixmap(scaled_rect(after, R), after);
-        else { p.setPen(C_DIM()); p.drawText(R, Qt::AlignCenter, "no result"); }
-        p.setPen(C_TEXT());
-        QFont f = p.font(); f.setPointSize(9); p.setFont(f);
-        p.drawText(QRect(8, 2, half - 16, 16), Qt::AlignLeft | Qt::AlignVCenter, before_name);
-        p.drawText(QRect(half + 8, 2, width() - half - 16, 16), Qt::AlignLeft | Qt::AlignVCenter, after_name);
-    }
+private:
+    bool syncing_ = false;
 };
 
 // ---------------------------------------------------------------- video compare
@@ -1299,13 +1416,16 @@ public:
     QComboBox* speed_combo = nullptr;
     QLabel* time_lbl = nullptr;
     QLabel* names[2] = {nullptr, nullptr};
+    ZoomBar* zbar = nullptr;
     bool user_seeking = false;
+    bool syncing_zoom = false;
 
     VideoCompare(QWidget* parent = nullptr) : QWidget(parent) {
         QVBoxLayout* root = new QVBoxLayout(this);
         root->setContentsMargins(0, 0, 0, 0);
         root->setSpacing(2);
         QHBoxLayout* tops = new QHBoxLayout;
+        tops->setSpacing(1);
         for (int i = 0; i < 2; i++) {
             QWidget* side = new QWidget(this);
             QVBoxLayout* sl = new QVBoxLayout(side);
@@ -1320,6 +1440,21 @@ public:
             tops->addWidget(side);
         }
         root->addLayout(tops, 1);
+        // the zoom widget the single preview has, wired to both panes: zoom
+        // or pan one side and the other rides along frame after frame
+        zbar = new ZoomBar(this);
+        zbar->setFixedHeight(28);
+        zbar->bind(cv[0]);
+        root->addWidget(zbar);
+        for (int i = 0; i < 2; i++) {
+            connect(cv[i], &ZoomCanvas::view_changed, this, [this, i](double zoom) {
+                if (syncing_zoom) return;
+                syncing_zoom = true;
+                cv[1 - i]->follow_view(zoom, cv[i]->view_offset());
+                syncing_zoom = false;
+                zbar->reflect(zoom);
+            });
+        }
 
         QHBoxLayout* ctrl = new QHBoxLayout;
         ctrl->setContentsMargins(6, 2, 6, 2);

@@ -541,9 +541,9 @@ inline bool decode_audio_stereo(const std::string& path, std::vector<float>& l,
                                 std::vector<float>& r, int sr = AUDIO_SR) {
     std::string srate = std::to_string(sr);
     Proc p;
-    if (!p.spawn({"ffmpeg", "-hide_banner", "-loglevel", "error", "-i", path,
+    if (!p.spawn({"ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-i", path,
                   "-f", "f32le", "-acodec", "pcm_f32le", "-ac", "2", "-ar", srate, "-"},
-                 true, false))
+                 true, false, true))
         return false;
     std::vector<float> raw;
     char buf[65536];

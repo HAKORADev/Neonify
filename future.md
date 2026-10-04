@@ -31,11 +31,14 @@ But it may get bigger later. The long-term idea:
   plus a **plugin for the Python one**
 - **VODER as DLC** for the side quests
 
+Neonify is a self-contained procedural neon engine with a GUI and a CLI.
+Quality and depth over breadth — the app itself is the product.
+
 ## The Road (loose order, not promises)
 
 | Step | What |
 |------|------|
-| 1 | Native C++ Neonify (done in this round — see `src/cpp/`) |
+| 1 | Native C++ Neonify (done — see `src/cpp/`) |
 | 2 | Cartoonify effects beside neonify effects |
 | 3 | Asciidea integration as an "ify" style |
 | 4 | IMDER add-on: compiled `.so`/`.dll` + Python plugin |
@@ -49,6 +52,30 @@ But it may get bigger later. The long-term idea:
   like the TTW explorify *text-to-explorable-world* pipeline.
 - We may rename **qwen image 2.1** from *tti overdose* to **"fast"** —
   since *overdose* should be given to something more worth it.
+- There is a **new uncensored qwen image 2.1** — worth comparing it against
+  the current one and seeing if it is worth adding.
+
+## IMDER Notes (parked here, since IMDER writes no planning docs)
+
+- IMDER gets a **Windows C++ build**.
+- The binary gets **much smaller for both Linux and Windows**.
+- The build moves to **GitHub workflows** — the current build is weird and
+  not that correct.
+
+## Engineering laws that carry forward
+
+- **gpu truth**: detection runs once, writes what it actually found into
+  neonify.ini, and every later run re-verifies. no invented numbers: if the
+  bench says the cpu wins, the cpu wins; if opencl refuses, the math runs on
+  the cpu and the file says so. cuda presence comes from the nvidia driver
+  itself (nvidia-smi), hardware decode is only claimed after a real decode
+  finished.
+- **naming**: outputs are `{name}_neonify_{effect}_{timestamp}.{ext}` — every
+  file describes itself: which effect made it, when. audio carries the real
+  applied profile tag.
+- **no stalls**: children are killed on stop, bounded waits everywhere, the
+  child registry next to the binary lets the next launch reap what a crash
+  left behind.
 
 ---
 
@@ -61,3 +88,7 @@ But it may get bigger later. The long-term idea:
 ### The VODER note (2025-10-02)
 
 > btw also the maNipulify may not make it's way to VODER or it may, not sure, also about VODER, i realized the qwen image 2.1 can be used for objectify as text to object since trellis can not generate images on it's own so may do a similar two-steps workflow like the ttw explorify text to explorable world, also we may rename qwen image 2.1 from tti overdose to "fast" since i guess overdose should be given for something more worth it, since we do not write planning docs in VODER, just put this in Neonify for now in new md
+
+### The VODER + IMDER note (2026-10-04)
+
+> since i do not have a planning file or a todo list for myself, write in the future.md that in VODER there is a new uncensored qwen image 2.1 that i may compare it against crrent one and see if worth adding, also in imder, i will make windows cpp and make the binary much smaller for both linux and cpp and make it build using github workflows since current build is weird and not that correct

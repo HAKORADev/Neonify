@@ -64,17 +64,20 @@ inline bool has_audio_stream(const std::string& path) {
     return !cap.empty();
 }
 
-inline std::vector<std::string> ffmpeg_vsync_args() {
-    std::string cap;
-    run_ok({"ffmpeg", "-version"}, &cap);
-    bool modern = false;
-    std::string::size_type p = cap.find("ffmpeg version");
-    if (p != std::string::npos) {
-        float v = std::atof(cap.c_str() + p + 14);
-        modern = v >= 5.0f;
-    }
-    if (modern) return {"-fps_mode", "vfr"};
-    return {"-vsync", "vfr"};
+inline const std::vector<std::string>& ffmpeg_vsync_args() {
+    static std::vector<std::string> args = [] {
+        std::string cap;
+        run_ok({"ffmpeg", "-nostdin", "-version"}, &cap);
+        bool modern = false;
+        std::string::size_type p = cap.find("ffmpeg version");
+        if (p != std::string::npos) {
+            float v = std::atof(cap.c_str() + p + 14);
+            modern = v >= 5.0f;
+        }
+        if (modern) return std::vector<std::string>{"-fps_mode", "vfr"};
+        return std::vector<std::string>{"-vsync", "vfr"};
+    }();
+    return args;
 }
 
 inline cv::Mat apply_spatial_shift(const cv::Mat& bloom, float dx, float dy, float max_shift) {
@@ -142,22 +145,21 @@ inline std::pair<std::string, int> process_video_file(
     bool hw_decode = hwaccel || app_ini().get_bool("video", "hwdecode", false);
 
     Proc rd;
-    std::vector<std::string> rd_cmd = {"ffmpeg", "-hide_banner", "-loglevel", "error"};
+    std::vector<std::string> rd_cmd = {"ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error"};
     if (hw_decode) rd_cmd.push_back("-hwaccel"), rd_cmd.push_back("auto");
     rd_cmd.push_back("-i"), rd_cmd.push_back(inp);
     rd_cmd.push_back("-f"), rd_cmd.push_back("rawvideo");
     rd_cmd.push_back("-pix_fmt"), rd_cmd.push_back("bgr24");
     rd_cmd.push_back("-v"), rd_cmd.push_back("error");
     rd_cmd.push_back("-");
-    if (!rd.spawn(rd_cmd, true, false))
+    if (!rd.spawn(rd_cmd, true, false, true))
         throw std::runtime_error("cannot spawn ffmpeg reader");
 
-    std::string vsync_arg = ffmpeg_vsync_args()[1];
-    std::string vsync_flag = ffmpeg_vsync_args()[0];
+    const std::vector<std::string>& vsync = ffmpeg_vsync_args();
     std::string raw_out = tmp + "/neon_out.mp4";
     std::string size_arg = std::to_string(w) + "x" + std::to_string(h);
     std::string rate_arg = std::to_string(fps);
-    std::vector<std::string> cmd = {"ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+    std::vector<std::string> cmd = {"ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
                                     "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", size_arg,
                                     "-r", rate_arg, "-i", "-"};
     if (!audio_wav.empty()) cmd.push_back("-i"), cmd.push_back(audio_wav);
@@ -168,11 +170,11 @@ inline std::pair<std::string, int> process_video_file(
         cmd.push_back("-b:a"), cmd.push_back("192k");
         cmd.push_back("-shortest");
     }
-    cmd.push_back(vsync_flag), cmd.push_back(vsync_arg);
+    cmd.push_back(vsync[0]), cmd.push_back(vsync[1]);
     cmd.push_back("-progress"), cmd.push_back("pipe:1");
     cmd.push_back(raw_out);
     Proc wr;
-    if (!wr.spawn(cmd, true, true)) throw std::runtime_error("cannot spawn ffmpeg writer");
+    if (!wr.spawn(cmd, true, true, true)) throw std::runtime_error("cannot spawn ffmpeg writer");
 
     std::atomic<long long> enc_ms{0};
     std::atomic<bool> enc_done{false};
@@ -218,17 +220,29 @@ inline std::pair<std::string, int> process_video_file(
                                                   : colorize(field, palette);
             cv::add(out, neon_core_u8(edges), out);
             if (inside_mode != INSIDE_WIPE) keep_inside_composite(out, frame, edges, field, inside_mode);
-            std::fwrite(out.data, 1, frame_bytes, wr.in);
+            // a dead encoder must surface here, not as a silent short file
+            if (std::fwrite(out.data, 1, frame_bytes, wr.in) != frame_bytes) {
+                std::string tail = wr.stderr_tail();
+                throw std::runtime_error("video encoder stopped accepting frames: " +
+                                         (tail.empty() ? out_path : tail));
+            }
             frame_no++;
             if (tracker && frame_no % 5 == 0)
-                tracker->step(double(frame_no) / double(n_frames));
+                tracker->step(double(frame_no) / double(n_frames),
+                              "frame " + std::to_string(frame_no) + "/" + std::to_string(n_frames));
         }
     } catch (...) {
+        rd.kill();
+        wr.kill();
         if (rd.out) std::fclose(rd.out), rd.out = nullptr;
+        if (wr.in) std::fclose(wr.in), wr.in = nullptr;
+        drain.join();
         throw;
     }
     if (rd.out) std::fclose(rd.out), rd.out = nullptr;
-    rd.wait_close();
+    rd.wait_close(15000);
+    if (rd.exit_code != 0 && frame_no > 0)
+        throw std::runtime_error("video reader failed mid-stream: " + rd.stderr_tail());
     std::fflush(wr.in);
     std::fclose(wr.in);
     wr.in = nullptr;
@@ -236,20 +250,43 @@ inline std::pair<std::string, int> process_video_file(
     if (tracker) tracker->complete_stage(frame_stage);
     if (tracker) {
         tracker->begin_stage(int(stages.size()) - 1, "compile");
+        auto last_move = std::chrono::steady_clock::now();
+        long long last_ms = -1;
+        bool stalled = false;
         while (!enc_done) {
             long long ms = enc_ms.load();
+            if (ms != last_ms) {
+                last_ms = ms;
+                last_move = std::chrono::steady_clock::now();
+            } else if (std::chrono::duration<double>(std::chrono::steady_clock::now() - last_move).count() > 90.0) {
+                // a wedged encoder never recovers — kill it so the drain
+                // thread sees EOF and this loop can leave
+                stalled = true;
+                wr.kill();
+                break;
+            }
             if (dur > 0 && ms > 0)
-                tracker->step(std::min(1.0, (double(ms) / 1e6) / double(dur)));
+                tracker->step(std::min(1.0, (double(ms) / 1e6) / double(dur)), "compile");
             std::this_thread::sleep_for(std::chrono::milliseconds(40));
         }
         long long ms = enc_ms.load();
         if (dur > 0 && ms > 0)
-            tracker->step(std::min(1.0, (double(ms) / 1e6) / double(dur)));
+            tracker->step(std::min(1.0, (double(ms) / 1e6) / double(dur)), "compile");
+        drain.join();
+        std::fclose(wr.out);
+        wr.out = nullptr;
+        wr.wait_close(30000);
+        if (stalled)
+            throw std::runtime_error("video encoder stalled and was killed: " +
+                                     (wr.stderr_tail().empty() ? out_path : wr.stderr_tail()));
+        if (wr.exit_code != 0)
+            throw std::runtime_error("video encode failed: " + wr.stderr_tail());
+    } else {
+        drain.join();
+        std::fclose(wr.out);
+        wr.out = nullptr;
+        wr.wait_close(30000);
     }
-    drain.join();
-    std::fclose(wr.out);
-    wr.out = nullptr;
-    wr.wait_close();
 
     std::string finalp;
     if (file_exists(raw_out)) {

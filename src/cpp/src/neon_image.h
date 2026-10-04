@@ -76,7 +76,7 @@ inline cv::Mat imread_robust(const std::string& path, int flags = cv::IMREAD_COL
     if (!img.empty()) return img;
     // third layer: anything ffmpeg decodes but the built-in codecs do not
     std::string cap;
-    if (!run_ok({"ffprobe", "-v", "error", "-select_streams", "v:0",
+    if (!run_ok({"ffprobe", "-nostdin", "-v", "error", "-select_streams", "v:0",
                  "-show_entries", "stream=width,height", "-of", "csv=p=0", path}, &cap) || cap.empty())
         return cv::Mat();
     int w = 0, h = 0;
@@ -85,9 +85,9 @@ inline cv::Mat imread_robust(const std::string& path, int flags = cv::IMREAD_COL
         return cv::Mat();
     trace("read: ffmpeg fallback");
     Proc p;
-    if (!p.spawn({"ffmpeg", "-hide_banner", "-loglevel", "error", "-i", path,
+    if (!p.spawn({"ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-i", path,
                   "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"},
-                 true, false))
+                 true, false, true))
         return cv::Mat();
     size_t need = size_t(w) * size_t(h) * 3;
     std::vector<uint8_t> raw(need);
@@ -492,14 +492,20 @@ inline void process_image_neon(const cv::Mat& img_bgr, const std::string& palett
     if (edges_out) *edges_out = edges;
 }
 
-// keep law: the original pixels stay wherever the mask is dark; the neon art
-// takes over where the edges (plus a tight local halo) live. no global wash.
+// keep law: only strong edges paint the neon — weak texture edges stay the
+// original pixels. edges^3 kills the per-pixel noise a photo is full of, the
+// tight halo hugs the tube, and everything the mask does not touch is the
+// original pixel exactly as it was. no global wash anywhere.
 inline cv::Mat keep_mask(const cv::Mat& edges) {
-    cv::Mat halo = wide_blur(edges, 6.0f) * 0.55f;
-    cv::Mat m = edges * 1.15f + halo;
+    cv::Mat strong;
+    cv::pow(edges, 3.0f, strong);
+    strong = strong * 1.25f;
+    cv::min(cv::max(strong, 0.f), 1.f, strong);
+    cv::Mat halo = wide_blur(strong, 2.6f) * 0.45f;
+    cv::Mat m = strong * 1.1f + halo;
     cv::min(cv::max(m, 0.f), 1.f, m);
     cv::Mat soft;
-    cv::GaussianBlur(m, soft, cv::Size(0, 0), 0.8, 0.8, cv::BORDER_REPLICATE);
+    cv::GaussianBlur(m, soft, cv::Size(0, 0), 0.7, 0.7, cv::BORDER_REPLICATE);
     return soft;
 }
 

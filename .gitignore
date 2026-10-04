@@ -2,3 +2,8 @@ neonify_tmp_*
 build/
 test_assets/out/
 src/cpp/src/neon_plugins.h
+results/
+neonify.ini
+neonify_children.txt
+neonify_trace.log
+neonify_probe_clip.mp4

@@ -113,6 +113,7 @@ jobs:
           if (-not (Test-Path "build\Release\neonify.ini")) { Write-Host "ini smoke FAILED - no neonify.ini"; exit 1 }
           $ini = Get-Content build\Release\neonify.ini -Raw
           if ($ini -notmatch "# valid:") { Write-Host "ini smoke FAILED - no comment law"; exit 1 }
+          if ($ini -match "\[desktop\]") { Write-Host "ini smoke FAILED - desktop section still in schema"; exit 1 }
           $outki = & build\Release\neonify.exe image test_assets\text.png --keep-inside 2>&1 | Out-String
           Write-Host $outki
           $outgl = & build\Release\neonify.exe image test_assets\text.png --global-glow 2>&1 | Out-String
@@ -140,27 +141,22 @@ jobs:
             $out2 = & build\Release\neonify.exe audio test_assets\stereo.wav 2>&1 | Out-String
             Write-Host $out2
             if (-not (Test-Path "results\*_neonify_*.wav")) { Write-Host "audio smoke FAILED - no output"; exit 1 }
+            ffmpeg -nostdin -y -f lavfi -i "testsrc=size=320x240:rate=25:duration=2" -c:v libx264 -preset ultrafast -pix_fmt yuv420p test_assets\reel.mp4 2> $null
+            $vid = (& build\Release\neonify.exe video test_assets\reel.mp4 2>&1 | Out-String)
+            Write-Host $vid
+            if ($vid -notmatch "neonify frames") { Write-Host "video feedback smoke FAILED - no stage line"; exit 1 }
+            if ($vid -notmatch "frame \d+/\d+") { Write-Host "video feedback smoke FAILED - no frame counters"; exit 1 }
+            if (-not (Test-Path "results\*_neonify_electric_*.mp4")) { Write-Host "video smoke FAILED - no output"; exit 1 }
           } else { Write-Host "ffmpeg not on runner - audio smoke skipped" }
           Write-Host "ini on disk:"
-          Get-Content build\Release\neonify.ini | Select-String -Pattern "^(gpu_name|video_encoder|desktop_backend|cpu_ms|detected)="
+          Get-Content build\Release\neonify.ini | Select-String -Pattern "^(gpu_name|video_encoder|cuda|cpu_ms|detected)="
           Write-Host "smoke OK"
-
-      - name: desktop neonifier probe smoke
-        shell: pwsh
-        run: |
-          # a gui-subsystem exe has no console of its own — cmd owns the redirect
-          cmd /c "build\Release\neonify-desktop.exe probe > probe_report.txt 2>&1"
-          $out = Get-Content probe_report.txt -Raw -ErrorAction SilentlyContinue
-          Write-Host $out
-          if (-not $out) { Write-Host "desktop probe FAILED - no report"; exit 1 }
-          if ($out -notmatch "desktop backend:") { Write-Host "desktop probe FAILED - bad report"; exit 1 }
 
       - name: collect portable bundle
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist\neonify | Out-Null
           Copy-Item build\Release\neonify.exe dist\neonify\
-          Copy-Item build\Release\neonify-desktop.exe dist\neonify\
           Copy-Item packaging\windows\cli.bat dist\neonify\
           Copy-Item packaging\windows\cmd.bat dist\neonify\
           Compress-Archive -Path dist\neonify -DestinationPath "neonify-windows-cpp-v${{ inputs.version }}.zip"
@@ -245,13 +241,14 @@ jobs:
             -DQt5_DIR=/opt/qts/lib/cmake/Qt5 -DOpenCV_DIR=/opt/src/ocvbuild
           cmake --build build -j "$(nproc)"
 
-      - name: smoke test (the real binary, image + composite modes + ini + mesh)
+      - name: smoke test (the real binary, image + composite modes + ini + mesh + video feedback)
         run: |
           command -v ffmpeg ffprobe || echo "no ffmpeg/ffprobe on runner"
           ./build/neonify image test_assets/text.png
           ls results/*_neonify_*.png > /dev/null || { echo "image smoke FAILED"; exit 1; }
           test -f build/neonify.ini || { echo "ini smoke FAILED"; exit 1; }
           grep -q "# valid:" build/neonify.ini || { echo "ini comment law FAILED"; exit 1; }
+          ! grep -q "\[desktop\]" build/neonify.ini || { echo "ini schema FAILED - desktop section still present"; exit 1; }
           ./build/neonify image test_assets/text.png --keep-inside
           ./build/neonify image test_assets/text.png --global-glow
           [ $(ls results/*_neonify_*.png | wc -l) -ge 3 ] || { echo "composite-mode smoke FAILED"; exit 1; }
@@ -264,15 +261,16 @@ jobs:
           mkdir -p "unicode dir"
           cp test_assets/text.png "unicode dir/ñéo öü.png"
           ./build/neonify image "unicode dir/ñéo öü.png"
+          ffmpeg -nostdin -y -f lavfi -i "testsrc=size=320x240:rate=25:duration=2" -c:v libx264 -preset ultrafast -pix_fmt yuv420p test_assets/reel.mp4 2>/dev/null
+          vid=$(./build/neonify video test_assets/reel.mp4 2>&1)
+          echo "$vid"
+          echo "$vid" | grep -q "neonify frames" || { echo "video feedback smoke FAILED - no stage line"; exit 1; }
+          echo "$vid" | grep -Eq "frame [0-9]+/[0-9]+" || { echo "video feedback smoke FAILED - no frame counters"; exit 1; }
+          ls results/*_neonify_electric_*.mp4 > /dev/null || { echo "video smoke FAILED - no output"; exit 1; }
           python3 scripts/make_test_meshes.py
           ./build/neonify mesh build/sphere.obj --turntable 24
           ls results/*_neonify_electric3d_*.mp4 > /dev/null || { echo "mesh turntable smoke FAILED"; exit 1; }
           echo "smoke OK"
-
-      - name: desktop neonifier probe smoke
-        run: |
-          ./build/neonify-desktop probe
-          echo "desktop probe OK"
 
       - name: gui startup smoke (xvfb, 8s alive)
         run: |
@@ -285,9 +283,8 @@ jobs:
         run: |
           mkdir -p dist/neonify
           cp build/neonify dist/neonify/
-          cp build/neonify-desktop dist/neonify/
           cp packaging/linux/cli.sh dist/neonify/ 2>/dev/null || true
-          chmod +x dist/neonify/neonify dist/neonify/neonify-desktop
+          chmod +x dist/neonify/neonify
           tar -czf "neonify-linux-cpp-v${{ inputs.version }}.tar.gz" -C dist neonify
 
       - uses: actions/upload-artifact@v4

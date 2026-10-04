@@ -24,6 +24,8 @@
 #endif
 #include <windows.h>
 #include <shellapi.h>
+#include <thread>
+#include <mutex>
 #undef min
 #undef max
 #include <io.h>
@@ -31,6 +33,10 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <sys/prctl.h>
+#include <signal.h>
+#include <thread>
+#include <mutex>
 #endif
 
 #ifndef M_PI
@@ -52,15 +58,14 @@ inline const char* APP_NAME = "NEONIFY";
 inline const char* APP_VER = "v0.5.0";
 
 // ---------------------------------------------------------------- banner
-// 1:1 with the old python: pyfiglet "big" font, left half blue / right half
-// red, white subtitle, then the 60-char rule. rows captured verbatim.
-inline const char* const BANNER_ROWS[6] = {
-    " _   _ ______ ____  _   _ _____ ________     __",
-    "| \\ | |  ____/ __ \\| \\ | |_   _|  ____\\ \\   / /",
-    "|  \\| | |__ | |  | |  \\| | | | | |__   \\ \\_/ / ",
-    "| . ` |  __|| |  | | . ` | | | |  __|   \\   /  ",
-    "| |\\  | |___| |__| | |\\  |_| |_| |       | |   ",
-    "|_| \\_|______\\____/|_| \\_|_____|_|       |_|   ",
+// 1:1 with the old python: the built-in 5x5 block font (no pyfiglet), left
+// half blue / right half red, white subtitle, then the 60-char rule.
+inline const char* const BANNER_ROWS[5] = {
+    "█...█  █████  .███.  █...█  █████  █████  █...█",
+    "██..█  █....  █...█  ██..█  ..█..  █....  █...█",
+    "█.█.█  ████.  █...█  █.█.█  ..█..  ████.  .█.█.",
+    "█..██  █....  █...█  █..██  ..█..  █....  ..█..",
+    "█...█  █████  .███.  █...█  █████  █....  ..█..",
 };
 
 // env-gated stderr breadcrumbs: NEONIFY_TRACE=1 ./neonify ...
@@ -90,23 +95,33 @@ inline bool stdout_is_tty() {
 #endif
 }
 
+// the banner rows speak utf-8 blocks — split at a column boundary, never at
+// a byte offset, or the color halves cut inside a block character
+inline void banner_split(const std::string& s, size_t col, std::string& left, std::string& right) {
+    size_t c = 0, i = 0;
+    while (i < s.size() && c < col) {
+        unsigned char b = (unsigned char)s[i];
+        size_t w = (b < 0x80) ? 1 : ((b >> 5) == 0x6) ? 2 : ((b >> 4) == 0xE) ? 3 : 4;
+        i += w;
+        c++;
+    }
+    left = s.substr(0, i);
+    right = s.substr(i);
+}
+
 inline void print_banner() {
     if (!stdout_is_tty()) {
         std::printf("%s\n", APP_NAME);
         return;
     }
-    const std::string blank(47, ' ');
     const size_t mid = 23;
     std::printf("\n");
-    for (int r = 0; r < 6; r++) {
-        std::string line = BANNER_ROWS[r];
-        line += blank.substr(line.size());
-        std::printf("%s%s%s%s%s%s\n", NEON_BLUE, line.substr(0, mid).c_str(), NEON_RESET,
-                    NEON_RED, line.substr(mid).c_str(), NEON_RESET);
+    for (int r = 0; r < 5; r++) {
+        std::string left, right;
+        banner_split(BANNER_ROWS[r], mid, left, right);
+        std::printf("%s%s%s%s%s%s\n", NEON_BLUE, left.c_str(), NEON_RESET,
+                    NEON_RED, right.c_str(), NEON_RESET);
     }
-    for (int r = 0; r < 2; r++)
-        std::printf("%s%s%s%s%s%s\n", NEON_BLUE, blank.substr(0, mid).c_str(), NEON_RESET,
-                    NEON_RED, blank.substr(mid).c_str(), NEON_RESET);
     std::printf("%s              procedural neon engine %s%s\n", NEON_WHITE, APP_VER, NEON_RESET);
     std::printf("============================================================\n");
 }
@@ -253,6 +268,17 @@ inline std::string unique_output_path(const std::string& path) {
     std::string::size_type dot = path.find_last_of('.');
     std::string base = (dot == std::string::npos || dot == 0) ? path : path.substr(0, dot);
     std::string ext = (dot == std::string::npos || dot == 0) ? "" : path.substr(dot);
+    // the law is one timestamp per name: when the stem already carries one
+    // (_yymmddhhmmss, 13 chars), it is replaced by the fresh draw instead of
+    // stacking a second one
+    if (base.size() > 13 && base[base.size() - 13] == '_') {
+        bool digits = true;
+        for (size_t i = base.size() - 12; i < base.size(); i++) {
+            char c = base[i];
+            if (c < '0' || c > '9') { digits = false; break; }
+        }
+        if (digits) base = base.substr(0, base.size() - 13);
+    }
     // same-second runs collide on the timestamp alone, so keep drawing until free
     for (int i = 0; i < 1000; i++) {
         std::string cand = base + timestamp_suffix();
@@ -357,13 +383,18 @@ public:
         }
     }
 
-    void step(double frac) {
+    void step(double frac) { step(frac, std::string()); }
+
+    // label_override rides along so counters can show real work units
+    // (frame 240/1200) instead of the bare stage name
+    void step(double frac, const std::string& label_override) {
         if (!enabled || current < 0) return;
         frac = std::max(0.0, std::min(1.0, frac));
         int new_pct = int(frac * 100);
-        if (new_pct != int(pct)) {
+        if (new_pct != int(pct) || (!label_override.empty() && label_override != step_label)) {
             pct = frac * 100.0;
-            draw();
+            step_label = label_override;
+            draw(label_override);
         }
     }
 
@@ -397,6 +428,7 @@ public:
 
 private:
     std::string last_line;
+    std::string step_label;
     std::chrono::steady_clock::time_point t0;
 
     void draw(const std::string& name = "") {
@@ -428,6 +460,151 @@ private:
     }
 };
 
+// ---------------------------------------------------------------- exe dir
+// next to the binary: the ini, the trace log and the child registry live here
+inline std::string exe_dir() {
+    std::string dir;
+#ifdef _WIN32
+    wchar_t buf[MAX_PATH + 1] = {0};
+    if (GetModuleFileNameW(nullptr, buf, MAX_PATH)) {
+        std::string full = utf8_from_wide(buf);
+        std::string::size_type s = full.find_last_of("\\/");
+        if (s != std::string::npos) dir = full.substr(0, s);
+    }
+#else
+    char buf[4096];
+    ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n > 0) {
+        buf[n] = 0;
+        std::string full(buf);
+        std::string::size_type s = full.find_last_of('/');
+        if (s != std::string::npos) dir = full.substr(0, s);
+    }
+#endif
+    if (dir.empty()) dir = ".";
+    return dir;
+}
+
+// ---------------------------------------------------------------- children
+// every ffmpeg/ffprobe child is written here next to the binary together
+// with the owner pid; the next launch kills children whose owner died, so a
+// crash or a freeze never leaves encoders stalled behind the app
+inline std::string children_path() {
+    return exe_dir() + "/neonify_children.txt";
+}
+
+inline long self_pid() {
+#ifdef _WIN32
+    return (long)GetCurrentProcessId();
+#else
+    return (long)getpid();
+#endif
+}
+
+inline bool pid_alive(long pid) {
+    if (pid <= 0) return false;
+#ifdef _WIN32
+    HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+    if (!h) return false;
+    DWORD w = WaitForSingleObject(h, 0);
+    CloseHandle(h);
+    return w == WAIT_TIMEOUT;
+#else
+    return ::kill((pid_t)pid, 0) == 0 || errno != ESRCH;
+#endif
+}
+
+inline bool pid_image_is_ffmpeg(long pid) {
+#ifdef _WIN32
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+    if (!h) return false;
+    wchar_t name[MAX_PATH + 1] = {0};
+    DWORD sz = MAX_PATH;
+    BOOL okf = QueryFullProcessImageNameW(h, 0, name, &sz);
+    CloseHandle(h);
+    if (!okf) return false;
+    std::string full = utf8_from_wide(name);
+    std::string::size_type s = full.find_last_of("\\/");
+    std::string base = (s == std::string::npos) ? full : full.substr(s + 1);
+    for (char& c : base) c = char(std::tolower((unsigned char)c));
+    return base.rfind("ffmpeg", 0) == 0 || base.rfind("ffprobe", 0) == 0;
+#else
+    std::ifstream f("/proc/" + std::to_string(pid) + "/comm");
+    if (!f.good()) return false;
+    std::string comm;
+    std::getline(f, comm);
+    return comm.rfind("ffmpeg", 0) == 0 || comm.rfind("ffprobe", 0) == 0;
+#endif
+}
+
+inline void pid_kill(long pid) {
+    if (pid <= 0) return;
+#ifdef _WIN32
+    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)pid);
+    if (h) {
+        TerminateProcess(h, (UINT)-1);
+        CloseHandle(h);
+    }
+#else
+    ::kill((pid_t)pid, SIGKILL);
+#endif
+}
+
+inline void child_register(long owner, long child, const std::string& name) {
+    std::ofstream f = open_ofstream(children_path(), std::ios::app);
+    if (!f.good()) return;
+    f << owner << " " << child << " " << name << "\n";
+}
+
+inline std::vector<std::string> child_lines() {
+    std::vector<std::string> lines;
+    std::ifstream f = open_ifstream(children_path());
+    std::string line;
+    while (std::getline(f, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        if (!line.empty()) lines.push_back(line);
+    }
+    return lines;
+}
+
+inline void child_write_lines(const std::vector<std::string>& lines) {
+    std::ofstream f = open_ofstream(children_path(), std::ios::binary | std::ios::trunc);
+    if (!f.good()) return;
+    for (const std::string& l : lines) f << l << "\n";
+}
+
+// the sweep: a child whose owner is gone is a stall left behind — kill it
+// when it really is an ffmpeg/ffprobe, never touch live owners' children
+inline void sweep_orphan_children() {
+    std::vector<std::string> lines = child_lines();
+    if (lines.empty()) return;
+    std::vector<std::string> keep;
+    for (const std::string& line : lines) {
+        std::istringstream is(line);
+        long owner = 0, child = 0;
+        std::string name;
+        if (!(is >> owner >> child >> name)) continue;
+        if (pid_alive(owner)) {
+            keep.push_back(line);
+            continue;
+        }
+        if (pid_alive(child) && pid_image_is_ffmpeg(child)) pid_kill(child);
+    }
+    child_write_lines(keep);
+}
+
+inline void child_unregister(long child) {
+    std::vector<std::string> lines = child_lines();
+    std::vector<std::string> keep;
+    for (const std::string& line : lines) {
+        std::istringstream is(line);
+        long owner = 0, c = 0;
+        if ((is >> owner >> c) && c == child) continue;
+        keep.push_back(line);
+    }
+    child_write_lines(keep);
+}
+
 // ---------------------------------------------------------------- process
 class Proc {
 public:
@@ -435,18 +612,37 @@ public:
     FILE* in = nullptr;
     int exit_code = -1;
 
-    bool spawn(const std::vector<std::string>& argv, bool capture_out, bool feed_in) {
+    ~Proc() {
+        if (in) {
+            std::fclose(in);
+            in = nullptr;
+        }
+        if (!reaped_) kill();
+        if (out) {
+            drain_out_discard();
+            std::fclose(out);
+            out = nullptr;
+        }
+        wait_close(500);
+    }
+
+    // capture_err pipes the child's stderr into a small tail buffer — the
+    // child can never block on a full stderr pipe again and failures carry
+    // the real ffmpeg message instead of silence
+    bool spawn(const std::vector<std::string>& argv, bool capture_out, bool feed_in,
+               bool capture_err = false) {
 #ifdef _WIN32
         SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
-        HANDLE orr = nullptr, owr = nullptr, irr = nullptr, iwr = nullptr;
+        HANDLE orr = nullptr, owr = nullptr, irr = nullptr, iwr = nullptr, errr = nullptr, errw = nullptr;
         if (capture_out && !CreatePipe(&orr, &owr, &sa, 0)) return false;
         if (feed_in && !CreatePipe(&irr, &iwr, &sa, 0)) return false;
+        if (capture_err && !CreatePipe(&errr, &errw, &sa, 0)) return false;
         STARTUPINFOW si{};
         si.cb = sizeof(si);
         si.dwFlags = STARTF_USESTDHANDLES;
         si.hStdInput = feed_in ? irr : HANDLE(_get_osfhandle(_fileno(stdin)));
         si.hStdOutput = capture_out ? owr : HANDLE(_get_osfhandle(_fileno(stdout)));
-        si.hStdError = HANDLE(_get_osfhandle(_fileno(stderr)));
+        si.hStdError = capture_err ? errw : HANDLE(_get_osfhandle(_fileno(stderr)));
         std::string cmd;
         for (size_t i = 0; i < argv.size(); i++) {
             if (i) cmd += " ";
@@ -457,22 +653,37 @@ public:
         cmdv.push_back(L'\0');
         if (!CreateProcessW(nullptr, cmdv.data(), nullptr, nullptr, TRUE,
                             CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+            if (orr) CloseHandle(orr);
+            if (irr) CloseHandle(irr);
+            if (errr) CloseHandle(errr);
+            if (errw) CloseHandle(errw);
             return false;
+        }
+        job_ = CreateJobObjectW(nullptr, nullptr);
+        if (job_) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION li{};
+            li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(job_, JobObjectExtendedLimitInformation, &li, sizeof(li));
+            AssignProcessToJobObject(job_, pi.hProcess);
         }
         if (owr) CloseHandle(owr);
         if (irr) CloseHandle(irr);
+        if (errw) CloseHandle(errw);
         if (capture_out) out = _fdopen(_open_osfhandle((intptr_t)orr, 0), "rb");
         if (feed_in) in = _fdopen(_open_osfhandle((intptr_t)iwr, 0), "wb");
-        return true;
+        if (capture_err) start_err_thread((intptr_t)errr);
 #else
-        int op[2] = {-1, -1}, ip[2] = {-1, -1};
+        int op[2] = {-1, -1}, ip[2] = {-1, -1}, ep[2] = {-1, -1};
         if (capture_out && pipe(op) != 0) return false;
         if (feed_in && pipe(ip) != 0) return false;
+        if (capture_err && pipe(ep) != 0) return false;
         pid = fork();
         if (pid < 0) return false;
         if (pid == 0) {
+            prctl(PR_SET_PDEATHSIG, SIGKILL);
             if (capture_out) { dup2(op[1], 1); close(op[0]); close(op[1]); }
             if (feed_in) { dup2(ip[0], 0); close(ip[0]); close(ip[1]); }
+            if (capture_err) { dup2(ep[1], 2); close(ep[0]); close(ep[1]); }
             std::vector<char*> av;
             for (auto& a : argv) av.push_back(const_cast<char*>(a.c_str()));
             av.push_back(nullptr);
@@ -481,47 +692,166 @@ public:
         }
         if (op[1] >= 0) close(op[1]);
         if (ip[0] >= 0) close(ip[0]);
+        if (ep[1] >= 0) close(ep[1]);
         if (capture_out) out = fdopen(op[0], "rb");
         if (feed_in) in = fdopen(ip[1], "wb");
+        if (capture_err) start_err_thread(ep[0]);
+#endif
+        registered_ = child_pid();
+        child_register(self_pid(), registered_, base_tool_name(argv));
         return true;
+    }
+
+    // the hard stop: terminate the child now so readers at the other end of
+    // its pipes wake up with EOF instead of waiting forever
+    void kill() {
+#ifdef _WIN32
+        std::lock_guard<std::mutex> lk(lifecycle_);
+        if (pi.hProcess && !reaped_) TerminateProcess(pi.hProcess, (UINT)-1);
+#else
+        std::lock_guard<std::mutex> lk(lifecycle_);
+        if (pid > 0 && !reaped_) ::kill(pid, SIGKILL);
 #endif
     }
 
-    int wait_close() {
-        if (in) { std::fclose(in); in = nullptr; }
+    // wait for the child, drain whatever is left of stdout, reap. timeout in
+    // milliseconds, negative waits forever — on timeout the child is killed
+    // and the wait finishes on the corpse, so no caller can hang here. the
+    // wait itself happens outside the lock so a concurrent kill() (the gui
+    // stopping a player decoder) lands immediately.
+    int wait_close(int timeout_ms = -1) {
+        if (in) {
+            std::fclose(in);
+            in = nullptr;
+        }
+        if (out) {
+            drain_out_discard();
+            std::fclose(out);
+            out = nullptr;
+        }
 #ifdef _WIN32
-        if (pi.hProcess) {
-            WaitForSingleObject(pi.hProcess, INFINITE);
-            DWORD code = 0;
-            GetExitCodeProcess(pi.hProcess, &code);
-            exit_code = (int)code;
-            if (out) { std::fclose(out); out = nullptr; }
-            CloseHandle(pi.hProcess);
-            CloseHandle(pi.hThread);
-            pi = PROCESS_INFORMATION{};
+        HANDLE h = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(lifecycle_);
+            if (!reaped_ && pi.hProcess) h = pi.hProcess;
+        }
+        if (h) {
+            DWORD w = WaitForSingleObject(h, timeout_ms < 0 ? INFINITE : DWORD(timeout_ms));
+            if (w != WAIT_OBJECT_0) TerminateProcess(h, (UINT)-1);
+            WaitForSingleObject(h, INFINITE);
+            std::lock_guard<std::mutex> lk(lifecycle_);
+            if (!reaped_) {
+                DWORD code = 0;
+                GetExitCodeProcess(h, &code);
+                exit_code = (int)code;
+                if (job_) CloseHandle(job_), job_ = nullptr;
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
+                pi = PROCESS_INFORMATION{};
+                reaped_ = true;
+            }
         }
 #else
-        if (pid > 0) {
-            int st = 0;
-            waitpid(pid, &st, 0);
-            exit_code = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
-            pid = -1;
+        pid_t target = -1;
+        {
+            std::lock_guard<std::mutex> lk(lifecycle_);
+            if (!reaped_ && pid > 0) target = pid;
         }
-        if (out) { std::fclose(out); out = nullptr; }
+        if (target > 0) {
+            auto deadline = std::chrono::steady_clock::now() +
+                            std::chrono::milliseconds(timeout_ms < 0 ? 3600000 : timeout_ms);
+            int st = 0;
+            while (waitpid(target, &st, WNOHANG) == 0) {
+                if (std::chrono::steady_clock::now() > deadline) {
+                    ::kill(target, SIGKILL);
+                    waitpid(target, &st, 0);
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(4));
+            }
+            std::lock_guard<std::mutex> lk(lifecycle_);
+            if (!reaped_) {
+                exit_code = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+                pid = -1;
+                reaped_ = true;
+            }
+        }
 #endif
+        join_err_thread();
+        child_unregister(registered_);
         return exit_code;
+    }
+
+    std::string stderr_tail() {
+        std::lock_guard<std::mutex> lk(err_mutex_);
+        return err_tail_;
     }
 
 private:
 #ifdef _WIN32
     PROCESS_INFORMATION pi{};
+    HANDLE job_ = nullptr;
     static std::string quote(const std::string& s) {
         if (s.find(' ') == std::string::npos && !s.empty()) return s;
         return '"' + s + '"';
     }
+    long child_pid() const { return pi.hProcess ? (long)pi.dwProcessId : -1; }
 #else
     pid_t pid = -1;
+    long child_pid() const { return (long)pid; }
 #endif
+    std::mutex lifecycle_;
+    std::mutex err_mutex_;
+    std::thread err_th_;
+    std::string err_tail_;
+    bool reaped_ = false;
+    long registered_ = -1;
+
+    static std::string base_tool_name(const std::vector<std::string>& argv) {
+        if (argv.empty()) return "child";
+        const std::string& a = argv[0];
+        std::string::size_type s = a.find_last_of("/\\");
+        std::string base = (s == std::string::npos) ? a : a.substr(s + 1);
+        for (char& c : base) c = char(std::tolower((unsigned char)c));
+        return base;
+    }
+
+    void start_err_thread(intptr_t handle) {
+        err_th_ = std::thread([this, handle] {
+            std::string acc;
+#ifdef _WIN32
+            HANDLE h = (HANDLE)handle;
+            char buf[4096];
+            DWORD nread = 0;
+            while (ReadFile(h, buf, sizeof(buf), &nread, nullptr) && nread) {
+                acc.append(buf, nread);
+                if (acc.size() > 8192) acc.erase(0, acc.size() - 8192);
+            }
+            CloseHandle(h);
+#else
+            int fd = (int)handle;
+            char buf[4096];
+            ssize_t n;
+            while ((n = ::read(fd, buf, sizeof(buf))) > 0) {
+                acc.append(buf, size_t(n));
+                if (acc.size() > 8192) acc.erase(0, acc.size() - 8192);
+            }
+            ::close(fd);
+#endif
+            std::lock_guard<std::mutex> lk(err_mutex_);
+            err_tail_ = acc;
+        });
+    }
+
+    void join_err_thread() {
+        if (err_th_.joinable()) err_th_.join();
+    }
+
+    void drain_out_discard() {
+        if (!out) return;
+        char buf[16384];
+        while (std::fread(buf, 1, sizeof(buf), out) > 0) {}
+    }
 };
 
 inline bool run_ok(const std::vector<std::string>& argv, std::string* capture = nullptr,
@@ -662,9 +992,9 @@ inline void attach_parent_console(int argc, char** argv) {
 #ifdef _WIN32
     if (argc < 2) return;
     std::string a0 = argv[1];
-    // gui and probe speak through their redirected pipes — only the raw cli
-    // double-click needs the parent console
-    if (a0 == "gui" || a0 == "probe" || a0 == "--help" || a0 == "-h") return;
+    // gui speaks through its redirected pipes — only the raw cli double-click
+    // needs the parent console
+    if (a0 == "gui" || a0 == "--help" || a0 == "-h") return;
     if (GetConsoleWindow() != nullptr) { console_utf8(); return; }
     if (!AttachConsole(ATTACH_PARENT_PROCESS)) return;
     freopen("CONOUT$", "w", stdout);

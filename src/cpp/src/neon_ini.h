@@ -1,6 +1,6 @@
-// NEONIFY native — the settings ini shared by the gui, the engines and the
-// desktop neonifier. layout law: every value carries two comment lines, the
-// first says what it is, the second says the valid range. a checker validates
+// NEONIFY native — the settings ini shared by the gui and the engines. layout
+// law: every value carries two comment lines, the first says what it is, the
+// second says the valid range. a checker validates
 // every load: missing, corrupt or extra data falls back to defaults without
 // wiping the file — only the broken values are rewritten, user-set values and
 // their comments survive. deleting the file makes the next run detect the
@@ -50,29 +50,6 @@ inline bool ini_field_valid(const std::string& value, const std::string& valid) 
         return false;
     }
     return !value.empty();
-}
-
-inline std::string exe_dir() {
-    std::string dir;
-#ifdef _WIN32
-    wchar_t buf[MAX_PATH + 1] = {0};
-    if (GetModuleFileNameW(nullptr, buf, MAX_PATH)) {
-        std::string full = utf8_from_wide(buf);
-        std::string::size_type s = full.find_last_of("\\/");
-        if (s != std::string::npos) dir = full.substr(0, s);
-    }
-#else
-    char buf[4096];
-    ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-    if (n > 0) {
-        buf[n] = 0;
-        std::string full(buf);
-        std::string::size_type s = full.find_last_of('/');
-        if (s != std::string::npos) dir = full.substr(0, s);
-    }
-#endif
-    if (dir.empty()) dir = ".";
-    return dir;
 }
 
 inline std::string ini_path() {

@@ -282,26 +282,30 @@ inline bool render_turntable_pipe(const std::string& out_path, const Mesh& mesh,
                                   float glow, int fps, int W = 960, int H = 720,
                                   const std::function<void(int)>& on_progress = nullptr) {
     Proc proc;
-    std::vector<std::string> cmd = {"ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+    // no -progress here: nothing drains stdout on this side, a full pipe
+    // would stall the encoder forever
+    std::vector<std::string> cmd = {"ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
                                     "-f", "rawvideo", "-pix_fmt", "bgr24",
                                     "-s", std::to_string(W) + "x" + std::to_string(H),
                                     "-r", std::to_string(fps), "-i", "-",
                                     "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-                                    "-pix_fmt", "yuv420p", "-progress", "pipe:1", out_path};
-    if (!proc.spawn(cmd, false, true)) return false;
+                                    "-pix_fmt", "yuv420p", out_path};
+    if (!proc.spawn(cmd, false, true, true)) return false;
     float base_pitch = elevation * float(M_PI) / 180.f;
     float base_yaw = azimuth * float(M_PI) / 180.f;
     try {
         for (int i = 0; i < n_frames; i++) {
             float yaw = base_yaw + 2.f * float(M_PI) * float(i) / float(std::max(1, n_frames));
             cv::Mat frame = render_neon_mesh(mesh, W, H, yaw, base_pitch, palette, glow);
-            std::fwrite(frame.data, 1, size_t(W) * H * 3, proc.in);
+            if (std::fwrite(frame.data, 1, size_t(W) * H * 3, proc.in) != size_t(W) * H * 3)
+                throw std::runtime_error("encoder stopped accepting frames: " + proc.stderr_tail());
             if (on_progress) on_progress(i + 1);
         }
         std::fflush(proc.in);
-        proc.wait_close();
+        proc.wait_close(60000);
     } catch (...) {
-        proc.wait_close();
+        proc.kill();
+        proc.wait_close(2000);
         return false;
     }
     return proc.exit_code == 0;
@@ -338,7 +342,10 @@ inline std::string neonize_mesh_file(const std::string& inp, const std::string& 
     }
     std::string finalp = unique_output_path(out_path);
     if (turntable > 0) {
-        auto cb = [&](int f) { if (tracker) tracker->step(double(f) / double(turntable)); };
+        auto cb = [&](int f) {
+            if (tracker) tracker->step(double(f) / double(turntable),
+                                       "frame " + std::to_string(f) + "/" + std::to_string(turntable));
+        };
         if (!render_turntable_pipe(finalp, mesh, turntable, azimuth, elevation, palette, glow, 30, 960, 720, cb))
             throw std::runtime_error("turntable encode failed");
     } else {
@@ -374,7 +381,10 @@ inline std::string neonize_relief_file(const std::string& inp, const std::string
     }
     std::string finalp = unique_output_path(out_path);
     if (turntable > 0) {
-        auto cb = [&](int f) { if (tracker) tracker->step(double(f) / double(turntable)); };
+        auto cb = [&](int f) {
+            if (tracker) tracker->step(double(f) / double(turntable),
+                                       "frame " + std::to_string(f) + "/" + std::to_string(turntable));
+        };
         if (!render_turntable_pipe(finalp, mesh, turntable, azimuth, elevation, palette, glow, 24, 960, 720, cb))
             throw std::runtime_error("relief turntable encode failed");
     } else {

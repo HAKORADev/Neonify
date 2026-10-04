@@ -17,17 +17,15 @@ Neonify turns images, videos, audio and 3D meshes into neon art. It runs locally
 
 Images: edges become glowing tubes, PNG transparency follows the source art, and the original can sit under the effect three ways — wiped to black, kept with neon only on the edges, or kept under the full global glow. Videos: the same treatment per frame, with an option to run the audio through it too. Audio: seven profiles (fire, ice, robotic, ghost, void, echo, slash) that each react to the Glow setting. 3D: OBJ / PLY / STL rendered as neon wireframes, still or as a 360° turntable video, plus image-to-relief remeshing with OBJ export.
 
-The desktop neonifier is a second binary in the same package: it captures the screen the low-level way (DXGI duplication on Windows, X11 or the desktop portal on Linux) and paints the neon effect live over your desktop or the focused window. `ctrl+alt+n` toggles it, `ctrl+alt+n` then `w` neonifies just the focused window. On first run every binary probes the machine once — graphics device, opencl, a real cpu/gpu benchmark, the video encoders ffmpeg can actually drive here — and writes `neonify.ini` next to the binary. Every value in that file carries two comment lines (what it is, what ranges are valid) and a checker repairs corrupt or extra entries back to defaults without touching the rest. Delete the file and the next run detects everything fresh.
+On first run the binary probes the machine once — graphics device, opencl, cuda through the nvidia driver, a real cpu/gpu benchmark, the video encoders ffmpeg can actually drive here, and a real hardware-decode pass — and writes `neonify.ini` next to the binary. Every value in that file carries two comment lines (what it is, what ranges are valid) and a checker repairs corrupt or extra entries back to defaults without touching the rest. Delete the file and the next run detects everything fresh.
 
 ## Download
 
 Get a package from the [releases](https://github.com/HAKORADev/Neonify/releases), extract, run:
 
 - `neonify.exe` — opens the GUI (Windows)
-- `neonify-desktop.exe` — the desktop neonifier, tray icon + hotkeys (Windows)
 - `cli.bat` — interactive CLI (Windows)
 - `./neonify` — GUI (Linux), `./neonify cli` — interactive CLI
-- `./neonify-desktop` — the desktop neonifier (Linux)
 
 ffmpeg is needed for video and audio only. Install it once: `winget install FFmpeg` on Windows, `sudo apt install ffmpeg` on Linux.
 
@@ -80,11 +78,12 @@ Default outputs land in `results/`, named `name_neonify_effect_timestamp` — `p
 
 ## Requirements
 
-Any recent desktop CPU. A GPU is used for the math when the first-run probe
-proves it is actually faster here, and ffmpeg can get hardware encoding when
-the machine has it — the ini records what was really detected. ffmpeg for video
-and audio. Windows 10+ or Linux (X11 fully supported; Wayland capture through
-the desktop portal, with the overlay presented through XWayland).
+Any recent desktop CPU. A GPU runs the neon math when the first-run probe
+proves it is actually faster here (an nvidia card with cuda — the gt 1030
+included — reaches it through opencl, and its nvdec decoder can take ffmpeg's
+decode work even where no hardware encoder exists), and ffmpeg can get
+hardware encoding when the machine has it — the ini records what was really
+detected. ffmpeg for video and audio. Windows 10+ or Linux.
 
 ## License
 
