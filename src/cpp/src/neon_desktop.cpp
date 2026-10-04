@@ -641,15 +641,8 @@ private:
 
 int run_desktop(int argc, char** argv) {
     std::vector<std::string> args(argv + 1, argv + argc);
-    // probe is a headless report — never let it die for lack of an x server
-    if (!args.empty() && args[0] == "probe" && !std::getenv("DISPLAY"))
-        qputenv("QT_QPA_PLATFORM", "offscreen");
-    QApplication app(argc, argv);
-    app.setApplicationName("Neonify Desktop");
-    app.setQuitOnLastWindowClosed(false);
-
     neon::IniFile& ini = neon::app_ini();
-
+    // probe is a pure headless report — no qt platform, no display needed
     if (!args.empty() && args[0] == "probe") {
         std::printf("desktop backend: %s\n", ini.get("hardware", "desktop_backend", "none").c_str());
         std::printf("gpu: %s (%s)\n", ini.get("hardware", "gpu_name", "none").c_str(),
@@ -661,6 +654,9 @@ int run_desktop(int argc, char** argv) {
         std::printf("ini: %s\n", neon::ini_path().c_str());
         return 0;
     }
+    QApplication app(argc, argv);
+    app.setApplicationName("Neonify Desktop");
+    app.setQuitOnLastWindowClosed(false);
 
     neon_desktop::DesktopApp desktop;
     return app.exec();
