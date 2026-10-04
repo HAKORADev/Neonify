@@ -94,7 +94,9 @@ inline std::pair<std::string, int> process_video_file(
         float glow, float threshold, float env, const std::string& audio_profile,
         bool spatial_glow, bool neon_audio, const Advanced& advanced_audio,
         StageTracker* tracker, int inside_mode = INSIDE_WIPE, bool hwaccel = false) {
+    trace("video: enter");
     VideoInfo probe = probe_video(inp);
+    trace("video: probed");
     if (!probe.ok) throw std::runtime_error("cannot probe video: " + inp);
     int w = probe.w, h = probe.h;
     float fps = probe.fps, dur = probe.dur;

@@ -160,10 +160,17 @@ jobs:
             if (-not $vp.WaitForExit(180000)) {
               Write-Host "video run TIMED OUT after 180s - killing"
               $vp.Kill($true)
-              Write-Host "--- vid_out.txt:"
+              Start-Sleep -Seconds 2
+              Write-Host "--- ffmpeg processes still alive:"
+              tasklist | Select-String -Pattern "ffmpeg|neonify"
+              Write-Host "--- vid_out.txt (size $((Get-Item vid_out.txt -ErrorAction SilentlyContinue).Length)):"
               Get-Content vid_out.txt -ErrorAction SilentlyContinue | Select-Object -Last 20
-              Write-Host "--- trace tail:"
-              Get-Content build\Release\neonify_trace.log -ErrorAction SilentlyContinue | Select-Object -Last 40
+              Write-Host "--- vid_err.txt:"
+              Get-Content vid_err.txt -ErrorAction SilentlyContinue | Select-Object -Last 20
+              Write-Host "--- full trace (repo root):"
+              Get-Content neonify_trace.log -ErrorAction SilentlyContinue | Select-Object -Last 60
+              Write-Host "--- ini facts:"
+              Get-Content build\Release\neonify.ini -ErrorAction SilentlyContinue | Select-String -Pattern "^(gpu_name|opencl|cuda|video_encoder|hwdecode|detected)="
               exit 1
             }
             Write-Host "== [10] video exit code $($vp.ExitCode)"
