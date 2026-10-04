@@ -189,11 +189,12 @@ inline std::string probe_video_encoder() {
     return "libx264";
 }
 
-// the decode probe encodes a tiny clip on the cpu first, then asks ffmpeg to
-// hardware-decode it with each backend by NAME — '-hwaccel auto' silently
-// pretends software decode was hardware, so the probe never trusts it. nvdec
-// (any geforce, the gt 1030 included) passes here even where no hardware
-// encoder exists on the card.
+// the decode probe encodes a tiny clip on the cpu first, then decodes it with
+// explicit hardware decoders BY NAME — '-hwaccel cuda' silently falls back to
+// software when the device refuses, so it can claim hardware where there is
+// none. an explicit input decoder (h264_cuvid and friends) is a hard
+// requirement: unknown means error, not fallback. nvdec (any geforce, the gt
+// 1030 included) passes here even where no hardware encoder exists.
 inline bool probe_hwdecode() {
     if (!which_ok("ffmpeg")) return false;
     std::string clip = exe_dir() + "/neonify_probe_clip.mp4";
@@ -204,10 +205,12 @@ inline bool probe_hwdecode() {
                         clip}, nullptr, true);
     bool ok = false;
     if (made && file_exists(clip)) {
-        static const char* const accels[] = {"cuda", "qsv", "vaapi", "dxva2", "videotoolbox"};
-        for (const char* a : accels) {
+        static const char* const decoders[] = {
+            "h264_cuvid", "h264_qsv", "h264_amf", "h264_d3d11va", "h264_dxva2", "h264_videotoolbox",
+        };
+        for (const char* dec : decoders) {
             if (run_ok({"ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
-                        "-hwaccel", a, "-i", clip, "-frames:v", "2", "-f", "null", "-"},
+                        "-c:v", dec, "-i", clip, "-frames:v", "2", "-f", "null", "-"},
                        nullptr, true)) {
                 ok = true;
                 break;

@@ -889,9 +889,8 @@ inline bool run_ok(const std::vector<std::string>& argv, std::string* capture = 
     if (nul) CloseHandle(nul);
     if (owr) CloseHandle(owr);
     if (!okf) return false;
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD code = 0;
-    GetExitCodeProcess(pi.hProcess, &code);
+    // the pipe is drained BEFORE the wait — a child that outgrew the buffer
+    // must not deadlock against its own output
     if (need && orr) {
         char buf[4096];
         DWORD nread = 0;
@@ -899,6 +898,9 @@ inline bool run_ok(const std::vector<std::string>& argv, std::string* capture = 
             capture->append(buf, nread);
         CloseHandle(orr);
     }
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     return code == 0;

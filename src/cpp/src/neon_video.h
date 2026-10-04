@@ -260,7 +260,7 @@ inline std::pair<std::string, int> process_video_file(
         }
     } catch (...) {
         wd_stop = true;
-        watchdog.join();
+        if (watchdog.joinable()) watchdog.join();
         rd.kill();
         wr.kill();
         if (rd.out) std::fclose(rd.out), rd.out = nullptr;
@@ -269,7 +269,7 @@ inline std::pair<std::string, int> process_video_file(
         throw;
     }
     wd_stop = true;
-    watchdog.join();
+    if (watchdog.joinable()) watchdog.join();
     if (wd_fired)
         throw std::runtime_error("video pipeline stalled (no activity for 120s) — children killed");
     trace("video: frames done");

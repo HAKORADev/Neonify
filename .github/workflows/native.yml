@@ -110,7 +110,7 @@ jobs:
           Write-Host "== [1] first run + detection"
           cmd /c "set NEONIFY_TRACE=1&& build\Release\neonify.exe image test_assets\text.png > first_run.txt 2>&1"
           Write-Host "== [1] exit code $LASTEXITCODE"
-          if (Test-Path "build\Release\neonify_trace.log") { Write-Host "--- trace file:"; Get-Content "build\Release\neonify_trace.log" | Select-Object -First 24 }
+          Get-Content build\Release\neonify.ini -ErrorAction SilentlyContinue | Select-String -Pattern "^(gpu_name|gpu_backend|opencl|cuda|cuda_name|cpu_ms|gpu_ms|video_encoder|hwdecode|detected)="          if (Test-Path "build\Release\neonify_trace.log") { Write-Host "--- trace file:"; Get-Content "build\Release\neonify_trace.log" | Select-Object -First 24 }
           $img = Get-Content first_run.txt -Raw
           if ($img -notmatch "Completed: 1/1") { Write-Host "image smoke FAILED"; exit 1 }
           if (-not (Test-Path "results\*_neonify_*.png")) { Write-Host "image smoke FAILED - no output"; exit 1 }
@@ -154,9 +154,24 @@ jobs:
             if (-not (Test-Path "results\*_neonify_*.wav")) { Write-Host "audio smoke FAILED - no output"; exit 1 }
             Write-Host "== [9] clip gen"
             ffmpeg -nostdin -y -f lavfi -i "testsrc=size=320x240:rate=25:duration=2" -c:v libx264 -preset ultrafast -pix_fmt yuv420p test_assets\reel.mp4 2> $null
-            Write-Host "== [10] video feedback"
-            $vid = (& build\Release\neonify.exe video test_assets\reel.mp4 2>&1 | Out-String)
+            Write-Host "== [10] video feedback (trace on, hard timeout)"
+            $env:NEONIFY_TRACE = "1"
+            $vp = Start-Process -FilePath "build\Release\neonify.exe" -ArgumentList "video", "test_assets\reel.mp4" -NoNewWindow -PassThru -RedirectStandardOutput vid_out.txt -RedirectStandardError vid_err.txt
+            if (-not $vp.WaitForExit(180000)) {
+              Write-Host "video run TIMED OUT after 180s - killing"
+              $vp.Kill($true)
+              Write-Host "--- vid_out.txt:"
+              Get-Content vid_out.txt -ErrorAction SilentlyContinue | Select-Object -Last 20
+              Write-Host "--- trace tail:"
+              Get-Content build\Release\neonify_trace.log -ErrorAction SilentlyContinue | Select-Object -Last 40
+              exit 1
+            }
+            Write-Host "== [10] video exit code $($vp.ExitCode)"
+            $vid = Get-Content vid_out.txt -Raw
             Write-Host $vid
+            Write-Host "--- trace tail:"
+            Get-Content build\Release\neonify_trace.log -ErrorAction SilentlyContinue | Select-Object -Last 12
+            $env:NEONIFY_TRACE = $null
             if ($vid -notmatch "neonify frames") { Write-Host "video feedback smoke FAILED - no stage line"; exit 1 }
             if ($vid -notmatch "frame \d+/\d+") { Write-Host "video feedback smoke FAILED - no frame counters"; exit 1 }
             if (-not (Test-Path "results\*_neonify_electric_*.mp4")) { Write-Host "video smoke FAILED - no output"; exit 1 }
