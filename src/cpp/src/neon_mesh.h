@@ -271,8 +271,10 @@ inline cv::Mat render_neon_mesh(const Mesh& mesh, int W = 960, int H = 720, floa
                  cv::Point(cvRound(b2[0]), cvRound(b2[1])), inten, 1, cv::LINE_AA);
     }
     cv::Mat field;
-    neon_glow_stack(cv::Mat(), canvas, glow, 1.0f, 0.12f, field);
-    return colorize(field, palette);
+    neon_glow_stack(canvas, glow, 1.0f, field);
+    cv::Mat col = colorize(field, palette);
+    cv::add(col, neon_core_u8(canvas), col);
+    return col;
 }
 
 inline bool render_turntable_pipe(const std::string& out_path, const Mesh& mesh, int n_frames,

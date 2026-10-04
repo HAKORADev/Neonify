@@ -55,9 +55,17 @@ jobs:
           path: |
             D:\src\ocvbuild
             D:\src\opencv
-          key: opencv-4.10.0-static-msvc-v4
+          key: opencv-4.10.0-static-msvc-opencl-v6
 
-      - name: build static opencv (core imgproc imgcodecs)
+      - name: opencl sdk (opencv builds its opencl path against these headers)
+        if: steps.ocvcache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          curl -L -o D:\opencl.zip https://github.com/KhronosGroup/OpenCL-SDK/releases/download/v2023.04.17/OpenCL-SDK-v2023.04.17-Win-x64.zip
+          Expand-Archive D:\opencl.zip -DestinationPath D:\opencl
+          Get-ChildItem D:\opencl -Recurse -Depth 2 | Select-Object FullName | Out-String -Width 200
+
+      - name: build static opencv (core imgproc imgcodecs + opencl loader)
         if: steps.ocvcache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
@@ -68,6 +76,9 @@ jobs:
             "-DBUILD_LIST=core,imgproc,imgcodecs" "-DBUILD_TESTS=OFF" "-DBUILD_PERF_TESTS=OFF" `
             "-DBUILD_EXAMPLES=OFF" "-DBUILD_opencv_apps=OFF" "-DBUILD_JPEG=ON" "-DBUILD_PNG=ON" `
             "-DBUILD_ZLIB=ON" "-DBUILD_WEBP=ON" "-DBUILD_TIFF=ON" "-DBUILD_OPENEXR=OFF" `
+            "-DWITH_OPENCL=ON" `
+            "-DOpenCL_INCLUDE_DIR=D:/opencl/OpenCL-SDK-v2023.04.17-Win-x64/include" `
+            "-DOpenCL_LIBRARY=D:/opencl/OpenCL-SDK-v2023.04.17-Win-x64/lib/OpenCL.lib" `
             "-DWITH_IPP=OFF" "-DWITH_ITT=OFF" "-DWITH_TBB=OFF" `
             "-DWITH_FFMPEG=OFF" "-DWITH_GTK=OFF" "-DWITH_OPENEXR=OFF" "-DWITH_JASPER=OFF" "-DENABLE_LIBJPEG_TURBO_SIMD=OFF"
           cmake --build D:\src\ocvbuild --config Release -j 4
@@ -87,30 +98,37 @@ jobs:
             -DOpenCV_DIR="D:\src\ocvbuild"
           cmake --build build --config Release -j 4
 
-      - name: smoke test (the real exe, image + audio)
+      - name: smoke test (the real exe, image + audio + composite modes + ini)
         shell: pwsh
         run: |
           $out = & build\Release\neonify.exe image test_assets\text.png 2>&1 | Out-String
           Write-Host $out
           if (-not (Test-Path "results\*_neonify_*.png")) { Write-Host "image smoke FAILED - no output"; exit 1 }
+          if (-not (Test-Path "build\Release\neonify.ini")) { Write-Host "ini smoke FAILED - no neonify.ini"; exit 1 }
+          $ini = Get-Content build\Release\neonify.ini -Raw
+          if ($ini -notmatch "# valid:") { Write-Host "ini smoke FAILED - no comment law"; exit 1 }
           $outki = & build\Release\neonify.exe image test_assets\text.png --keep-inside 2>&1 | Out-String
           Write-Host $outki
-          $ki = Get-ChildItem "results\*_neonify_*.png" | Measure-Object
-          if ($ki.Count -lt 2) { Write-Host "keep-inside smoke FAILED"; exit 1 }
+          $outgl = & build\Release\neonify.exe image test_assets\text.png --global-glow 2>&1 | Out-String
+          Write-Host $outgl
+          $all = Get-ChildItem "results\*_neonify_*.png" | Measure-Object
+          if ($all.Count -lt 3) { Write-Host "composite-mode smoke FAILED"; exit 1 }
           $outj = & build\Release\neonify.exe image test_assets\text.jpg 2>&1 | Out-String
           Write-Host $outj
           $all = Get-ChildItem "results\*" | Measure-Object
-          if ($all.Count -lt 3) { Write-Host "jpg smoke FAILED"; exit 1 }
+          if ($all.Count -lt 4) { Write-Host "jpg smoke FAILED"; exit 1 }
           $outs = & build\Release\neonify.exe image test_assets\sweep.png --palette spectrum 2>&1 | Out-String
           Write-Host $outs
           $spec = Get-ChildItem "results\*_neonify_spectrum_*.png" | Measure-Object
           if ($spec.Count -lt 1) { Write-Host "spectrum smoke FAILED"; exit 1 }
+          $outp = & build\Release\neonify.exe image test_assets\text.png --palette synthwave 2>&1 | Out-String
+          Write-Host $outp
+          $syn = Get-ChildItem "results\*_neonify_synthwave_*.png" | Measure-Object
+          if ($syn.Count -lt 1) { Write-Host "palette smoke FAILED"; exit 1 }
           New-Item -ItemType Directory -Force -Path "unicode dir" | Out-Null
           Copy-Item test_assets\text.png "unicode dir\ñéo öü.png"
           $outu = & build\Release\neonify.exe image "unicode dir\ñéo öü.png" 2>&1 | Out-String
           Write-Host $outu
-          $uni = Get-ChildItem "results\*neonify*.png" | Measure-Object
-          if ($uni.Count -lt 3) { Write-Host "unicode path smoke FAILED"; exit 1 }
           $ff = Get-Command ffmpeg -ErrorAction SilentlyContinue
           if ($ff) {
             $out2 = & build\Release\neonify.exe audio test_assets\stereo.wav 2>&1 | Out-String
@@ -119,11 +137,20 @@ jobs:
           } else { Write-Host "ffmpeg not on runner - audio smoke skipped" }
           Write-Host "smoke OK"
 
+      - name: desktop neonifier probe smoke
+        shell: pwsh
+        run: |
+          $out = & build\Release\neonify-desktop.exe probe 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { Write-Host "desktop probe FAILED"; exit 1 }
+          if ($out -notmatch "desktop backend:") { Write-Host "desktop probe FAILED - no report"; exit 1 }
+
       - name: collect portable bundle
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist\neonify | Out-Null
           Copy-Item build\Release\neonify.exe dist\neonify\
+          Copy-Item build\Release\neonify-desktop.exe dist\neonify\
           Copy-Item packaging\windows\cli.bat dist\neonify\
           Copy-Item packaging\windows\cmd.bat dist\neonify\
           Compress-Archive -Path dist\neonify -DestinationPath "neonify-windows-cpp-v${{ inputs.version }}.zip"
@@ -148,7 +175,8 @@ jobs:
             libxcb-randr0-dev libxcb-render-util0-dev libxcb-util-dev libxcb-xinerama0-dev \
             libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev \
             libfreetype6-dev libgl1-mesa-dev libglib2.0-dev ninja-build \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libunwind-dev xvfb
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libunwind-dev xvfb \
+            ocl-icd-opencl-dev libpipewire-0.3-dev libsystemd-dev
 
       - name: cache static qt
         id: qtcache
@@ -180,7 +208,7 @@ jobs:
           path: |
             /opt/src/ocvbuild
             /opt/src/opencv
-          key: opencv-4.10.0-static-linux-v4
+          key: opencv-4.10.0-static-linux-opencl-v6
 
       - name: build static opencv
         if: steps.ocvcache.outputs.cache-hit != 'true'
@@ -192,7 +220,7 @@ jobs:
             -DBUILD_LIST=core,imgproc,imgcodecs -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF \
             -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DBUILD_JPEG=ON -DBUILD_PNG=ON \
             -DBUILD_ZLIB=ON -DBUILD_WEBP=ON -DBUILD_TIFF=ON -DBUILD_OPENEXR=OFF \
-            -DBUILD_JPEG2000=OFF -DWITH_IPP=OFF -DWITH_ITT=OFF -DWITH_TBB=OFF \
+            -DBUILD_JPEG2000=OFF -DWITH_OPENCL=ON -DWITH_IPP=OFF -DWITH_ITT=OFF -DWITH_TBB=OFF \
             -DWITH_FFMPEG=OFF -DWITH_GTK=OFF -DWITH_OPENEXR=OFF -DWITH_JASPER=OFF -DENABLE_LIBJPEG_TURBO_SIMD=OFF
           cmake --build /opt/src/ocvbuild -j "$(nproc)"
 
@@ -207,22 +235,34 @@ jobs:
             -DQt5_DIR=/opt/qts/lib/cmake/Qt5 -DOpenCV_DIR=/opt/src/ocvbuild
           cmake --build build -j "$(nproc)"
 
-      - name: smoke test (the real binary, image)
+      - name: smoke test (the real binary, image + composite modes + ini + mesh)
         run: |
           command -v ffmpeg ffprobe || echo "no ffmpeg/ffprobe on runner"
           ./build/neonify image test_assets/text.png
           ls results/*_neonify_*.png > /dev/null || { echo "image smoke FAILED"; exit 1; }
+          test -f build/neonify.ini || { echo "ini smoke FAILED"; exit 1; }
+          grep -q "# valid:" build/neonify.ini || { echo "ini comment law FAILED"; exit 1; }
           ./build/neonify image test_assets/text.png --keep-inside
-          [ $(ls results/*_neonify_*.png | wc -l) -ge 2 ] || { echo "keep-inside smoke FAILED"; exit 1; }
+          ./build/neonify image test_assets/text.png --global-glow
+          [ $(ls results/*_neonify_*.png | wc -l) -ge 3 ] || { echo "composite-mode smoke FAILED"; exit 1; }
           NEONIFY_TRACE=1 ./build/neonify image test_assets/text.jpg
-          [ $(ls results/ | wc -l) -ge 3 ] || { echo "jpg smoke FAILED"; exit 1; }
+          [ $(ls results/ | wc -l) -ge 4 ] || { echo "jpg smoke FAILED"; exit 1; }
           ./build/neonify image test_assets/sweep.png --palette spectrum
           [ $(ls results/*_neonify_spectrum_*.png | wc -l) -ge 1 ] || { echo "spectrum smoke FAILED"; exit 1; }
+          ./build/neonify image test_assets/text.png --palette synthwave
+          [ $(ls results/*_neonify_synthwave_*.png | wc -l) -ge 1 ] || { echo "palette smoke FAILED"; exit 1; }
           mkdir -p "unicode dir"
           cp test_assets/text.png "unicode dir/ñéo öü.png"
           ./build/neonify image "unicode dir/ñéo öü.png"
-          [ $(ls results/*neonify*.png | wc -l) -ge 3 ] || { echo "unicode path smoke FAILED"; exit 1; }
+          python3 scripts/make_test_meshes.py
+          ./build/neonify mesh build/sphere.obj --turntable 24
+          ls results/*_neonify_electric3d_*.mp4 > /dev/null || { echo "mesh turntable smoke FAILED"; exit 1; }
           echo "smoke OK"
+
+      - name: desktop neonifier probe smoke
+        run: |
+          ./build/neonify-desktop probe
+          echo "desktop probe OK"
 
       - name: gui startup smoke (xvfb, 8s alive)
         run: |
@@ -235,8 +275,9 @@ jobs:
         run: |
           mkdir -p dist/neonify
           cp build/neonify dist/neonify/
+          cp build/neonify-desktop dist/neonify/
           cp packaging/linux/cli.sh dist/neonify/ 2>/dev/null || true
-          chmod +x dist/neonify/neonify
+          chmod +x dist/neonify/neonify dist/neonify/neonify-desktop
           tar -czf "neonify-linux-cpp-v${{ inputs.version }}.tar.gz" -C dist neonify
 
       - uses: actions/upload-artifact@v4
@@ -244,57 +285,8 @@ jobs:
           name: neonify-linux-cpp
           path: neonify-linux-cpp-v${{ inputs.version }}.tar.gz
 
-  windows-python:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
-      - name: build
-        run: pyinstaller --clean --noconfirm neonify.spec
-      - name: collect portable bundle
-        shell: pwsh
-        run: |
-          Copy-Item packaging\windows\cli.bat dist\neonify\
-          Copy-Item packaging\windows\cmd.bat dist\neonify\
-          Compress-Archive -Path dist\neonify -DestinationPath "neonify-windows-python-v${{ inputs.version }}.zip"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: neonify-windows-python
-          path: neonify-windows-python-v${{ inputs.version }}.zip
-
-  linux-python:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
-      - name: build
-        run: pyinstaller --clean --noconfirm neonify.spec
-      - name: collect portable bundle
-        run: |
-          cp packaging/linux/cli.sh dist/neonify/ 2>/dev/null || true
-          cp packaging/linux/install.sh dist/neonify/ 2>/dev/null || true
-          tar -czf "neonify-linux-python-v${{ inputs.version }}.tar.gz" -C dist neonify
-      - uses: actions/upload-artifact@v4
-        with:
-          name: neonify-linux-python
-          path: neonify-linux-python-v${{ inputs.version }}.tar.gz
-
   release:
-    needs: [windows-cpp, linux-cpp, windows-python, linux-python]
+    needs: [windows-cpp, linux-cpp]
     runs-on: ubuntu-latest
     if: ${{ inputs.publish }}
     steps:
@@ -316,6 +308,4 @@ jobs:
           gh release upload "$TAG" \
             "pkgs/neonify-windows-cpp/neonify-windows-cpp-$TAG.zip" \
             "pkgs/neonify-linux-cpp/neonify-linux-cpp-$TAG.tar.gz" \
-            "pkgs/neonify-windows-python/neonify-windows-python-$TAG.zip" \
-            "pkgs/neonify-linux-python/neonify-linux-python-$TAG.tar.gz" \
             --clobber

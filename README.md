@@ -15,28 +15,25 @@
 
 Neonify turns images, videos, audio and 3D meshes into neon art. It runs locally on your machine, no accounts, no uploads.
 
-Images: edges become glowing tubes, PNG transparency follows the source art, and an optional keep-inside mode keeps the whole original look under the effect. Videos: the same treatment per frame, with an option to run the audio through it too. Audio: seven profiles (fire, ice, robotic, ghost, void, echo, slash) that each react to the Glow setting. 3D: OBJ / PLY / STL rendered as neon wireframes, still or as a 360° turntable video, plus image-to-relief remeshing with OBJ export.
+Images: edges become glowing tubes, PNG transparency follows the source art, and the original can sit under the effect three ways — wiped to black, kept with neon only on the edges, or kept under the full global glow. Videos: the same treatment per frame, with an option to run the audio through it too. Audio: seven profiles (fire, ice, robotic, ghost, void, echo, slash) that each react to the Glow setting. 3D: OBJ / PLY / STL rendered as neon wireframes, still or as a 360° turntable video, plus image-to-relief remeshing with OBJ export.
+
+The desktop neonifier is a second binary in the same package: it captures the screen the low-level way (DXGI duplication on Windows, X11 or the desktop portal on Linux) and paints the neon effect live over your desktop or the focused window. `ctrl+alt+n` toggles it, `ctrl+alt+n` then `w` neonifies just the focused window. On first run every binary probes the machine once — graphics device, opencl, a real cpu/gpu benchmark, the video encoders ffmpeg can actually drive here — and writes `neonify.ini` next to the binary. Every value in that file carries two comment lines (what it is, what ranges are valid) and a checker repairs corrupt or extra entries back to defaults without touching the rest. Delete the file and the next run detects everything fresh.
 
 ## Download
 
 Get a package from the [releases](https://github.com/HAKORADev/Neonify/releases), extract, run:
 
 - `neonify.exe` — opens the GUI (Windows)
+- `neonify-desktop.exe` — the desktop neonifier, tray icon + hotkeys (Windows)
 - `cli.bat` — interactive CLI (Windows)
 - `./neonify` — GUI (Linux), `./neonify cli` — interactive CLI
+- `./neonify-desktop` — the desktop neonifier (Linux)
 
 ffmpeg is needed for video and audio only. Install it once: `winget install FFmpeg` on Windows, `sudo apt install ffmpeg` on Linux.
 
-There is also a Python build per platform for running from source:
-
-```bash
-git clone https://github.com/HAKORADev/Neonify.git
-cd Neonify
-pip install -r requirements.txt
-python src/python/neonify.py            # interactive CLI
-python src/python/neonify.py gui        # GUI
-python src/python/neonify.py image photo.png --palette ice
-```
+The Python source under `src/python` still runs from source if you have the
+dependencies, but it is frozen — the native build is the product and the only
+thing the releases ship.
 
 ## The GUI
 
@@ -59,12 +56,14 @@ Without a command, `neonify` opens the GUI. `neonify cli` opens the interactive 
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--palette` | `electric` | `electric`, `crimson`, `ice`, `toxic`, `violet`, `golden`, `ghost`, `spectrum` (rainbow edges) |
+| `--palette` | `electric` | `electric`, `synthwave`, `toxic`, `ice`, `fire`, `ghost`, `spectrum` (rainbow edges) |
 | `--glow` | `1.0` | glow intensity 0.1–3.0 |
 | `--threshold` | `0.12` | edge sensitivity 0.02–0.5 |
 | `--env` | `1.0` | ambient detail 0–2 |
 | `-o, --output` | auto | output path |
 | `--next-to-input` | off | save next to the input file instead of `results/` |
+| `--keep-inside` | off | keep the original, neon only on the edges (images/videos) |
+| `--global-glow` | off | keep the original under the full global glow field |
 | `--profile` | `slash` | audio profile (audio mode, or video with `--neon-audio`) |
 | `--neon-audio` | off | neonify the audio with the video |
 | `--no-spatial` | off | disable spatial glow (stereo pan) |
@@ -77,11 +76,15 @@ Without a command, `neonify` opens the GUI. `neonify cli` opens the interactive 
 
 ## Outputs
 
-Default outputs land in `results/`, named `name_neonify_effect_timestamp` — `photo_neonify_ice_261003152708.png`, `track_neonify_fire_261003153228.wav`, `clip_neonify_crimson_261003154510.mp4`. Use `--next-to-input` (or the GUI checkbox) to save next to the input file instead. Nothing ever overwrites.
+Default outputs land in `results/`, named `name_neonify_effect_timestamp` — `photo_neonify_ice_261003152708.png`, `track_neonify_fire_261003153228.wav`, `clip_neonify_synthwave_261003154510.mp4`. The interactive CLI also offers a custom output path as a third location. Nothing ever overwrites.
 
 ## Requirements
 
-Any recent desktop CPU. ffmpeg for video and audio. Windows 10+ or Linux.
+Any recent desktop CPU. A GPU is used for the math when the first-run probe
+proves it is actually faster here, and ffmpeg can get hardware encoding when
+the machine has it — the ini records what was really detected. ffmpeg for video
+and audio. Windows 10+ or Linux (X11 fully supported; Wayland capture through
+the desktop portal, with the overlay presented through XWayland).
 
 ## License
 

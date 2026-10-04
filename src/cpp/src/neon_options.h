@@ -12,7 +12,7 @@ struct Options {
     float env = 1.0f;
     std::string output;
     bool next_to_input = false;
-    bool keep_inside = false;
+    int inside_mode = 0;  // 0 wipe, 1 keep original under neon, 2 global glow
     std::string profile;
     bool spatial = true;
     bool neon_audio = false;

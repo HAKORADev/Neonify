@@ -1,9 +1,12 @@
-// NEONIFY native — video engine: raw bgr24 pipes into x264, real-time compile %
+// NEONIFY native — video engine: raw bgr24 pipes into the encoder, real-time
+// compile %. the encoder comes from the ini (probed at first run): nvenc/qsv/
+// amf/vaapi when the machine proved it, libx264 otherwise.
 #pragma once
 
 #include "neon_common.h"
 #include "neon_image.h"
 #include "neon_audio.h"
+#include "neon_hw.h"
 #include <opencv2/imgproc.hpp>
 #include <cstdlib>
 #include <thread>
@@ -87,7 +90,7 @@ inline std::pair<std::string, int> process_video_file(
         const std::string& inp, const std::string& out_path, const std::string& palette,
         float glow, float threshold, float env, const std::string& audio_profile,
         bool spatial_glow, bool neon_audio, const Advanced& advanced_audio,
-        StageTracker* tracker, bool keep_inside = false) {
+        StageTracker* tracker, int inside_mode = INSIDE_WIPE, bool hwaccel = false) {
     VideoInfo probe = probe_video(inp);
     if (!probe.ok) throw std::runtime_error("cannot probe video: " + inp);
     int w = probe.w, h = probe.h;
@@ -135,10 +138,18 @@ inline std::pair<std::string, int> process_video_file(
     }
     if (tracker && tracker->current < 1) tracker->complete_stage(0);
 
+    std::string enc = resolved_video_encoder(app_ini());
+    bool hw_decode = hwaccel || app_ini().get_bool("video", "hwdecode", false);
+
     Proc rd;
-    if (!rd.spawn({"ffmpeg", "-hide_banner", "-loglevel", "error", "-i", inp,
-                   "-f", "rawvideo", "-pix_fmt", "bgr24", "-v", "error", "-"},
-                  true, false))
+    std::vector<std::string> rd_cmd = {"ffmpeg", "-hide_banner", "-loglevel", "error"};
+    if (hw_decode) rd_cmd.push_back("-hwaccel"), rd_cmd.push_back("auto");
+    rd_cmd.push_back("-i"), rd_cmd.push_back(inp);
+    rd_cmd.push_back("-f"), rd_cmd.push_back("rawvideo");
+    rd_cmd.push_back("-pix_fmt"), rd_cmd.push_back("bgr24");
+    rd_cmd.push_back("-v"), rd_cmd.push_back("error");
+    rd_cmd.push_back("-");
+    if (!rd.spawn(rd_cmd, true, false))
         throw std::runtime_error("cannot spawn ffmpeg reader");
 
     std::string vsync_arg = ffmpeg_vsync_args()[1];
@@ -150,9 +161,7 @@ inline std::pair<std::string, int> process_video_file(
                                     "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", size_arg,
                                     "-r", rate_arg, "-i", "-"};
     if (!audio_wav.empty()) cmd.push_back("-i"), cmd.push_back(audio_wav);
-    cmd.push_back("-c:v"), cmd.push_back("libx264");
-    cmd.push_back("-preset"), cmd.push_back("medium");
-    cmd.push_back("-crf"), cmd.push_back("18");
+    video_encoder_args(enc, cmd);
     cmd.push_back("-pix_fmt"), cmd.push_back("yuv420p");
     if (!audio_wav.empty()) {
         cmd.push_back("-c:a"), cmd.push_back("aac");
@@ -196,7 +205,7 @@ inline std::pair<std::string, int> process_video_file(
             cv::Mat ang;
             edge_field(frame, glow, threshold, env, edges, aux, &ang);
             cv::Mat field;
-            neon_glow_stack(frame, edges, glow, env, threshold, field);
+            neon_glow_stack(edges, glow, env, field);
             if (!spatial_maps.empty() && frame_no < int64_t(spatial_maps.size())) {
                 float dx = spatial_maps[size_t(frame_no)].first;
                 float dy = spatial_maps[size_t(frame_no)].second;
@@ -207,7 +216,8 @@ inline std::pair<std::string, int> process_video_file(
             }
             cv::Mat out = (palette == "spectrum") ? spectrum_colorize(field, ang)
                                                   : colorize(field, palette);
-            if (keep_inside) keep_inside_composite(out, frame, edges, field);
+            cv::add(out, neon_core_u8(edges), out);
+            if (inside_mode != INSIDE_WIPE) keep_inside_composite(out, frame, edges, field, inside_mode);
             std::fwrite(out.data, 1, frame_bytes, wr.in);
             frame_no++;
             if (tracker && frame_no % 5 == 0)

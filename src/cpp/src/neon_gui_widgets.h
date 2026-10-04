@@ -220,15 +220,17 @@ public:
         if (s == speed) return;
         double at = playing ? pos_ms() : base_ms;
         speed = s;
-        if (playing) start_output(at);
+        if (playing) start_output(qint64(at));
     }
 
     qint64 pos_ms() const {
         if (!have_pcm) return base_ms;
         if (!playing || !out) return base_ms;
         double dev_us = double(out->processedUSecs());
-        double media = base_ms + (dev_us - base_us) / 1000.0 / speed;
-        return qint64(std::min(media, double(dur_ms)));
+        // the stretched buffer advances the media `speed` microseconds per
+        // device microsecond; pause re-bases exactly because this only runs
+        // while playing
+        return qint64(std::min(base_ms + dev_us / 1000.0 * speed, double(dur_ms)));
     }
 
 signals:
@@ -241,19 +243,19 @@ private slots:
     void pump() {
         if (!out || !playing || !have_pcm) return;
         const QByteArray& buf = buffer_for(speed);
-        qint64 dur_us = qint64(double(dur_ms) * 1000.0 * speed);
+        qint64 buf_frames = qint64(buf.size()) / 4;
         int free_b = out->bytesFree();
-        while (free_b > 0 && fed_us < dur_us) {
-            qint64 byte_at = qint64(double(fed_us) / 1e6 * 44100.0 * speed) * 4;
-            if (byte_at >= buf.size()) break;
+        while (free_b > 0 && fed_frames < buf_frames) {
+            qint64 byte_at = fed_frames * 4;
             int chunk = int(std::min<qint64>(std::min<qint64>(free_b, 16384), buf.size() - byte_at));
             if (!dev) break;
             qint64 wrote = dev->write(buf.constData() + byte_at, chunk);
             if (wrote <= 0) break;
-            fed_us += qint64(double(wrote / 4) / (44100.0 * speed) * 1e6);
+            fed_frames += wrote / 4;
             free_b -= int(wrote);
         }
-        if (fed_us >= dur_us && out->processedUSecs() >= dur_us + 60000) {
+        qint64 total_dev_us = qint64(double(dur_ms) * 1000.0 / speed);
+        if (fed_frames >= buf_frames && out->processedUSecs() >= total_dev_us + 60000) {
             base_ms = dur_ms;
             pause();
             emit finished();
@@ -261,19 +263,25 @@ private slots:
     }
 
 private:
+    // playback law: stretch the source to `frames / speed` frames, play it
+    // linearly at 44100. speed 0.5 doubles the samples (slower), speed 2 halves
+    // them (faster) — the old code had this inverted, which is why slower
+    // played faster. positions track written frames, so nothing jumps.
     const QByteArray& buffer_for(double s) {
         auto it = cache.find(s);
         if (it != cache.end()) return it->second;
         if (s == 1.0) return cache.emplace(s, src).first->second;
         const int16_t* in = reinterpret_cast<const int16_t*>(src.constData());
         size_t frames_in = size_t(src.size()) / 4;
-        size_t frames_out = size_t(double(frames_in) * s);
+        if (frames_in < 2) return cache.emplace(s, src).first->second;
+        size_t frames_out = size_t(double(frames_in) / s);
         QByteArray resampled;
         resampled.resize(int(frames_out * 4));
         int16_t* o = reinterpret_cast<int16_t*>(resampled.data());
         for (size_t i = 0; i < frames_out; i++) {
-            double t = double(i) / s;
+            double t = double(i) * s;
             size_t i0 = size_t(t);
+            if (i0 >= frames_in) i0 = frames_in - 1;
             size_t i1 = std::min(i0 + 1, frames_in - 1);
             double f = t - double(i0);
             for (int c = 0; c < 2; c++) {
@@ -294,8 +302,7 @@ private:
             out = nullptr;
             dev = nullptr;
         }
-        base_us = 0;
-        fed_us = 0;
+        fed_frames = 0;
     }
 
     void start_output(qint64 from_ms) {
@@ -310,10 +317,10 @@ private:
         fmt.setSampleType(QAudioFormat::SignedInt);
         out = new QAudioOutput(fmt, this);
         out->setBufferSize(44100 * 4);
-        base_us = 0;
-        fed_us = qint64(double(from_ms) / 1000.0 * 1000.0 * speed);
+        const QByteArray& buf = buffer_for(speed);
+        qint64 buf_frames = qint64(buf.size()) / 4;
+        fed_frames = std::min<qint64>(qint64(double(from_ms) / 1000.0 * 44100.0 / speed), buf_frames);
         base_ms = from_ms;
-        buffer_for(speed);
         dev = out->start();
         playing = true;
         feed->start();
@@ -336,8 +343,7 @@ private:
     double speed = 1.0;
     qint64 dur_ms = 0;
     qint64 base_ms = 0;
-    qint64 base_us = 0;
-    qint64 fed_us = 0;
+    qint64 fed_frames = 0;
     QString err;
 };
 
@@ -405,47 +411,311 @@ protected:
     }
 };
 
-// ---------------------------------------------------------------- image canvas
-// fixed walls: the picture always fits inside the frame, no zoom, no pan
-class ImageCanvas : public QWidget {
+// ---------------------------------------------------------------- zoom canvas
+// one zoom/pan law for images and video frames. the media always fits the
+// walls first. zoom ceiling scales with the media: every 100x100 pixel block
+// buys another 2x, so a 4000x4000 shot reaches 40x (4000%) — sqrt(w*h)/100.
+// the zoom anchor is the mouse point (ctrl+wheel or ctrl+up/down), panning is
+// animated with an ease-out glide and arrow-key panning ramps 1% -> 10% of the
+// viewport per second while held. nothing moves in instant jumps.
+class ZoomCanvas : public QWidget {
+    Q_OBJECT
+
 public:
-    QPixmap pix;
+    ZoomCanvas(QWidget* parent = nullptr) : QWidget(parent) {
+        setMouseTracking(true);
+        setFocusPolicy(Qt::ClickFocus);
+        anim = new QTimer(this);
+        anim->setInterval(16);
+        anim->setTimerType(Qt::PreciseTimer);
+        connect(anim, &QTimer::timeout, this, &ZoomCanvas::step_anim);
+    }
 
-    ImageCanvas(QWidget* parent = nullptr) : QWidget(parent) {}
-
-    void set_pixmap(const QPixmap& pm) {
-        pix = pm;
+    void set_media(const QImage& img) {
+        bool resized = img.size() != media.size();
+        media = img;
+        if (!media.isNull()) message.clear();
+        if (resized || zoom_ <= 0) fit();
         update();
     }
 
-    QRectF target_rect() const {
-        if (pix.isNull()) return QRectF();
-        QSize view = size();
-        double fit = std::min(double(view.width() - 16) / pix.width(),
-                              double(view.height() - 16) / pix.height());
-        if (fit > 1.0) fit = 1.0;
-        double w = pix.width() * fit, h = pix.height() * fit;
-        return QRectF((view.width() - w) / 2.0, (view.height() - h) / 2.0, w, h);
+    bool has_media() const { return !media.isNull(); }
+
+    QString message;
+
+    double zoom_pct() const { return zoom_ * 100.0; }
+
+    double max_zoom() const {
+        if (media.isNull()) return 1.0;
+        double m = std::sqrt(double(media.width()) * double(media.height())) / 100.0;
+        return std::max(1.0, m);
     }
 
+    double fit_zoom() const {
+        if (media.isNull()) return 1.0;
+        double fw = double(width() - 16) / media.width();
+        double fh = double(height() - 16) / media.height();
+        return std::min(fw, fh);
+    }
+
+    void fit() {
+        zoom_ = std::max(0.01, fit_zoom());
+        center_media();
+        update();
+        emit zoom_changed(zoom_pct());
+    }
+
+    void set_zoom_pct(double pct) {
+        zoom_to_point(QPointF(width() / 2.0, height() / 2.0), pct / 100.0);
+    }
+
+    // the media point under widget_pos stays under widget_pos afterwards
+    void zoom_to_point(QPointF widget_pos, double target) {
+        if (media.isNull()) return;
+        double lo = std::max(0.01, std::min(fit_zoom() * 0.5, 1.0));
+        double hi = max_zoom();
+        target = std::max(lo, std::min(hi, target));
+        QPointF media_pt = (widget_pos - offset_) / zoom_;
+        offset_ = widget_pos - media_pt * target;
+        zoom_ = target;
+        clamp_offset();
+        update();
+        emit zoom_changed(zoom_pct());
+    }
+
+signals:
+    void zoom_changed(double pct);
+
 protected:
+    QRectF media_rect() const {
+        return QRectF(offset_, QSizeF(media.width() * zoom_, media.height() * zoom_));
+    }
+
+    void center_media() {
+        if (media.isNull()) {
+            offset_ = QPointF(0, 0);
+            return;
+        }
+        offset_ = QPointF((width() - media.width() * zoom_) / 2.0,
+                          (height() - media.height() * zoom_) / 2.0);
+    }
+
+    void clamp_offset() {
+        if (media.isNull()) return;
+        double mw = media.width() * zoom_, mh = media.height() * zoom_;
+        double margin_x = std::max(0.0, (width() - mw) / 2.0);
+        double margin_y = std::max(0.0, (height() - mh) / 2.0);
+        if (mw <= width()) {
+            offset_.setX((width() - mw) / 2.0);
+        } else {
+            offset_.setX(std::min(0.0, std::max(width() - mw, offset_.x())));
+        }
+        if (mh <= height()) {
+            offset_.setY((height() - mh) / 2.0);
+        } else {
+            offset_.setY(std::min(0.0, std::max(height() - mh, offset_.y())));
+        }
+        (void)margin_x;
+        (void)margin_y;
+    }
+
     void paintEvent(QPaintEvent*) override {
         QPainter p(this);
         p.fillRect(rect(), QColor(0x0a, 0x0a, 0x0a));
-        if (pix.isNull()) return;
-        QRectF r = target_rect();
+        if (media.isNull()) {
+            if (!message.isEmpty()) {
+                p.setPen(C_DIM());
+                p.drawText(rect(), Qt::AlignCenter, message);
+            }
+            return;
+        }
         p.setRenderHint(QPainter::SmoothPixmapTransform);
-        p.drawPixmap(r, pix, QRectF(pix.rect()));
+        QRectF r = media_rect();
+        p.drawImage(r, media, QRectF(media.rect()));
+        p.setRenderHint(QPainter::SmoothPixmapTransform, false);
         p.setPen(QPen(QColor(0x30, 0x30, 0x30), 1));
         p.drawRect(r.adjusted(-1, -1, 0, 0));
     }
-    void resizeEvent(QResizeEvent*) override { update(); }
+
+    void resizeEvent(QResizeEvent*) override {
+        if (zoom_ > 0 && !media.isNull()) {
+            clamp_offset();
+            update();
+        }
+    }
+
+    void wheelEvent(QWheelEvent* e) override {
+        if (media.isNull()) return;
+        if (e->modifiers() & Qt::ControlModifier) {
+            double step = std::pow(1.0018, double(e->angleDelta().y()));
+            zoom_to_point(e->posF(), zoom_ * step);
+        } else {
+            pan_target_ += QPointF(0.0, -double(e->angleDelta().y()) * 0.6);
+            glide();
+        }
+    }
+
+    void keyPressEvent(QKeyEvent* e) override {
+        QPointF dir;
+        switch (e->key()) {
+            case Qt::Key_Up: dir = QPointF(0, -1); break;
+            case Qt::Key_Down: dir = QPointF(0, 1); break;
+            case Qt::Key_Left: dir = QPointF(-1, 0); break;
+            case Qt::Key_Right: dir = QPointF(1, 0); break;
+            default: QWidget::keyPressEvent(e); return;
+        }
+        if (e->modifiers() & Qt::ControlModifier) {
+            // zoom at the pointer (or viewport center when the mouse is away)
+            double step = e->key() == Qt::Key_Up ? 1.12 : (e->key() == Qt::Key_Down ? 1.0 / 1.12 : 1.0);
+            if (step != 1.0) {
+                QPointF anchor = mapFromGlobal(QCursor::pos());
+                if (!rect().contains(anchor.toPoint())) anchor = QPointF(width() / 2.0, height() / 2.0);
+                zoom_to_point(anchor, zoom_ * step);
+            }
+            return;
+        }
+        pan_dir_ = dir;
+        hold_start_ = std::chrono::steady_clock::now();
+        if (!anim->isActive()) anim->start();
+    }
+
+    void keyReleaseEvent(QKeyEvent* e) override {
+        if (e->key() == Qt::Key_Up || e->key() == Qt::Key_Down ||
+            e->key() == Qt::Key_Left || e->key() == Qt::Key_Right) {
+            pan_dir_ = QPointF();
+        }
+        QWidget::keyReleaseEvent(e);
+    }
+
+    void mousePressEvent(QMouseEvent* e) override {
+        if (e->button() == Qt::LeftButton) {
+            dragging_ = true;
+            drag_from_ = e->localPos();
+            setCursor(Qt::ClosedHandCursor);
+        }
+    }
+
+    void mouseMoveEvent(QMouseEvent* e) override {
+        if (dragging_) {
+            QPointF d = e->localPos() - drag_from_;
+            drag_from_ = e->localPos();
+            offset_ += d;
+            clamp_offset();
+            update();
+        }
+    }
+
+    void mouseReleaseEvent(QMouseEvent* e) override {
+        if (e->button() == Qt::LeftButton) {
+            dragging_ = false;
+            setCursor(Qt::ArrowCursor);
+        }
+    }
+
+private slots:
+    // one easing law for everything: the visible offset chases its target with
+    // an exponential glide, so wheel pans and key pans arrive smoothly
+    void glide() {
+        if (!anim->isActive()) anim->start();
+    }
+
+    void step_anim() {
+        bool moved = false;
+        if (!pan_dir_.isNull() && !media.isNull()) {
+            double held = std::chrono::duration<double>(std::chrono::steady_clock::now() - hold_start_).count();
+            double frac = 0.01 + 0.09 * std::min(1.0, held / 1.2);  // 1% -> 10% of viewport
+            pan_target_ += QPointF(pan_dir_.x() * width() * frac * 0.016,
+                                   pan_dir_.y() * height() * frac * 0.016);
+            moved = true;
+        }
+        if (pan_target_ != QPointF()) {
+            QPointF want = base_offset_ + pan_target_;
+            QPointF next = offset_ + (want - offset_) * 0.30;
+            if ((want - next).manhattanLength() < 0.5) next = want;
+            offset_ = next;
+            clamp_offset();
+            moved = true;
+        }
+        if (!moved) {
+            anim->stop();
+            base_offset_ = offset_;
+            pan_target_ = QPointF();
+            return;
+        }
+        update();
+    }
+
+protected:
+    QImage media;
+    double zoom_ = 0.0;
+    QPointF offset_;
+    QPointF base_offset_;
+    QPointF pan_target_;
+    QPointF pan_dir_;
+    std::chrono::steady_clock::time_point hold_start_;
+    bool dragging_ = false;
+    QPointF drag_from_;
+    QTimer* anim = nullptr;
+};
+
+// ---------------------------------------------------------------- zoom bar
+// the zoom widget: minus, the live percentage, plus, fit and 1:1
+class ZoomBar : public QWidget {
+public:
+    ZoomBar(QWidget* parent = nullptr) : QWidget(parent) {
+        QHBoxLayout* l = new QHBoxLayout(this);
+        l->setContentsMargins(8, 0, 8, 0);
+        l->setSpacing(6);
+        out_btn = new QPushButton("-", this);
+        in_btn = new QPushButton("+", this);
+        fit_btn = new QPushButton("fit", this);
+        orig_btn = new QPushButton("100%", this);
+        label = new QLabel("100%", this);
+        label->setStyleSheet("color:#888888;font-size:11px;min-width:52px;");
+        label->setAlignment(Qt::AlignCenter);
+        for (QPushButton* b : {out_btn, in_btn, fit_btn, orig_btn}) {
+            b->setStyleSheet("QPushButton{background:#1d1d1d;color:#cccccc;border:1px solid #2f2f2f;"
+                             "border-radius:4px;padding:2px 10px;font-size:11px;}"
+                             "QPushButton:hover{color:#ffffff;border-color:#4a4a4a;}");
+            b->setFixedHeight(22);
+        }
+        l->addWidget(out_btn);
+        l->addWidget(label, 1);
+        l->addWidget(in_btn);
+        l->addWidget(fit_btn);
+        l->addWidget(orig_btn);
+    }
+
+    void bind(ZoomCanvas* c) {
+        canvas = c;
+        connect(c, &ZoomCanvas::zoom_changed, this, [this](double pct) {
+            label->setText(QString::number(int(pct + 0.5)) + "%");
+        });
+        connect(out_btn, &QPushButton::clicked, this, [this] {
+            canvas->zoom_to_point(QPointF(canvas->width() / 2.0, canvas->height() / 2.0),
+                                  canvas->zoom_pct() / 100.0 / 1.25);
+        });
+        connect(in_btn, &QPushButton::clicked, this, [this] {
+            canvas->zoom_to_point(QPointF(canvas->width() / 2.0, canvas->height() / 2.0),
+                                  canvas->zoom_pct() / 100.0 * 1.25);
+        });
+        connect(fit_btn, &QPushButton::clicked, this, [this] { canvas->fit(); });
+        connect(orig_btn, &QPushButton::clicked, this, [this] { canvas->set_zoom_pct(100.0); });
+    }
+
+private:
+    ZoomCanvas* canvas = nullptr;
+    QPushButton* out_btn = nullptr;
+    QPushButton* in_btn = nullptr;
+    QPushButton* fit_btn = nullptr;
+    QPushButton* orig_btn = nullptr;
+    QLabel* label = nullptr;
 };
 
 // ---------------------------------------------------------------- video canvas
-// ffmpeg decodes frames into a small ring; a timer displays them at the
-// file's fps times the chosen speed. no system video backends involved.
-class VideoCanvas : public QWidget {
+// ffmpeg decodes frames into a small ring; the zoom canvas displays them at
+// the file's fps times the chosen speed. no system video backends involved.
+class VideoCanvas : public ZoomCanvas {
     Q_OBJECT
 
 public:
@@ -460,7 +730,7 @@ public:
     double speed = 1.0;
     bool reached_end = false;
 
-    VideoCanvas(QWidget* parent = nullptr) : QWidget(parent) {
+    VideoCanvas(QWidget* parent = nullptr) : ZoomCanvas(parent) {
         tick = new QTimer(this);
         tick->setTimerType(Qt::PreciseTimer);
         connect(tick, &QTimer::timeout, this, &VideoCanvas::advance);
@@ -481,8 +751,13 @@ public:
         cur = QImage();
         cur_frame = 0;
         reached_end = false;
-        if (!ok) error = QStringLiteral("cannot open this video (ffmpeg needed)");
-        update();
+        if (!ok) {
+            error = QStringLiteral("cannot open this video (ffmpeg needed)");
+            message = error;
+        } else {
+            message = QStringLiteral("ready \xe2\x80\x94 press play");
+        }
+        set_media(QImage());
         emit state_changed();
         return ok;
     }
@@ -511,6 +786,8 @@ public:
         cur_frame = 0;
         reached_end = false;
         cur = QImage();
+        message = QStringLiteral("ready \xe2\x80\x94 press play");
+        set_media(QImage());
         emit state_changed();
     }
 
@@ -563,35 +840,12 @@ public slots:
         cur = next;
         cur_frame++;
         cv_full.notify_all();
-        update();
+        set_media(cur);
         emit state_changed();
     }
 
 protected:
-    void paintEvent(QPaintEvent*) override {
-        QPainter p(this);
-        p.fillRect(rect(), QColor(0x05, 0x05, 0x05));
-        if (!ok) {
-            p.setPen(C_DIM());
-            p.drawText(rect(), Qt::AlignCenter, error);
-            return;
-        }
-        if (cur.isNull()) {
-            p.setPen(C_DIM());
-            p.drawText(rect(), Qt::AlignCenter, QStringLiteral("ready \xe2\x80\x94 press play"));
-            return;
-        }
-        QSize view = size();
-        double fit = std::min(double(view.width() - 12) / cur.width(),
-                              double(view.height() - 12) / cur.height());
-        double w = cur.width() * fit, h = cur.height() * fit;
-        QRectF r((view.width() - w) / 2.0, (view.height() - h) / 2.0, w, h);
-        p.setRenderHint(QPainter::SmoothPixmapTransform);
-        p.drawImage(r, cur);
-        p.setPen(QPen(QColor(0x30, 0x30, 0x30), 1));
-        p.drawRect(r.adjusted(-1, -1, 0, 0));
-    }
-    void resizeEvent(QResizeEvent*) override { update(); }
+    void resizeEvent(QResizeEvent*) override { ZoomCanvas::resizeEvent(nullptr); }
 
 private:
     QTimer* tick = nullptr;
@@ -603,7 +857,13 @@ private:
     std::atomic<bool> dec_busy{false};
 
     void stop_decoder() {
-        stop_flag = true;
+        {
+            // stop_flag must change under the mutex the decoder waits on — a
+            // plain atomic store racing the predicate check is the lost wakeup
+            // that froze the whole app on pause
+            std::lock_guard<std::mutex> lk(mtx);
+            stop_flag = true;
+        }
         cv_full.notify_all();
         if (dec.joinable()) dec.join();
         stop_flag = false;
@@ -632,7 +892,7 @@ private:
                 if (!ring.empty()) {
                     cur = ring.front();
                     ring.pop_front();
-                    update();
+                    set_media(cur);
                 }
             }, Qt::QueuedConnection);
             dec_busy = false;
@@ -731,6 +991,10 @@ public:
         l->setSpacing(2);
         canvas = new VideoCanvas(this);
         l->addWidget(canvas, 1);
+        ZoomBar* video_bar = new ZoomBar(this);
+        video_bar->setFixedHeight(28);
+        video_bar->bind(canvas);
+        l->addWidget(video_bar);
         QHBoxLayout* ctrl = new QHBoxLayout;
         ctrl->setContentsMargins(8, 2, 8, 4);
         play_btn = new QPushButton("Play", this);
@@ -924,14 +1188,23 @@ public:
 // ---------------------------------------------------------------- single viewer
 class SingleViewer : public QStackedWidget {
 public:
-    ImageCanvas* canvas = nullptr;
+    ZoomCanvas* canvas = nullptr;
     VideoPlayerPage* video = nullptr;
     AudioWavePage* audio_page = nullptr;
     QLabel* text_label = nullptr;
 
     SingleViewer(QWidget* parent = nullptr) : QStackedWidget(parent) {
-        canvas = new ImageCanvas(this);
-        addWidget(canvas);
+        QWidget* image_page = new QWidget(this);
+        QVBoxLayout* il = new QVBoxLayout(image_page);
+        il->setContentsMargins(0, 0, 0, 0);
+        il->setSpacing(0);
+        canvas = new ZoomCanvas(image_page);
+        il->addWidget(canvas, 1);
+        ZoomBar* image_bar = new ZoomBar(image_page);
+        image_bar->setFixedHeight(28);
+        image_bar->bind(canvas);
+        il->addWidget(image_bar);
+        addWidget(image_page);
         video = new VideoPlayerPage(this);
         addWidget(video);
         audio_page = new AudioWavePage(this);
@@ -944,9 +1217,9 @@ public:
         setCurrentIndex(0);
     }
 
-    void show_image(const QPixmap& pm) {
-        canvas->set_pixmap(pm);
-        setCurrentWidget(canvas);
+    void show_image(const QImage& img) {
+        canvas->set_media(img);
+        setCurrentIndex(0);
     }
 
     void show_video(const QString& path) {
@@ -960,11 +1233,11 @@ public:
 
     void show_text(const QString& t) {
         text_label->setText(t);
-        setCurrentWidget(text_label);
+        setCurrentIndex(3);
     }
 
     void reset() {
-        canvas->set_pixmap(QPixmap());
+        canvas->set_media(QImage());
         video->stop();
         audio_page->stop();
         audio_page->current.clear();

@@ -14,6 +14,8 @@
 #include <QFileDialog>
 #include <QDragEnterEvent>
 #include <QMimeData>
+#include <QProcess>
+#include <QCoreApplication>
 #include <atomic>
 
 #ifdef NEONIFY_STATIC_QT
@@ -198,11 +200,12 @@ public:
             try {
                 if (k == KImage) {
                     neon::neonize_image_file(inp, out, opts.palette, opts.glow,
-                                             opts.threshold, opts.env, &tr, nullptr, opts.keep_inside);
+                                             opts.threshold, opts.env, &tr, nullptr, opts.inside_mode);
                 } else if (k == KVideo) {
                     neon::process_video_file(inp, out, opts.palette, opts.glow, opts.threshold,
                                              opts.env, opts.profile, opts.spatial,
-                                             opts.neon_audio, opts.advanced, &tr, opts.keep_inside);
+                                             opts.neon_audio, opts.advanced, &tr, opts.inside_mode,
+                                             opts.hwaccel);
                 } else if (k == KAudio) {
                     std::string prof = opts.profile.empty() ? "slash" : opts.profile;
                     neon::neonize_audio_file(inp, out, prof, opts.glow, opts.advanced, &tr);
@@ -362,7 +365,7 @@ public:
     QCheckBox* neon_audio = nullptr;
     QCheckBox* spatial = nullptr;
     QCheckBox* next_to_input = nullptr;
-    QCheckBox* keep_inside = nullptr;
+    QComboBox* inside_combo = nullptr;
     QPushButton* adv_btn = nullptr;
     std::map<std::string, float> advanced;
     QComboBox* turn_combo = nullptr;
@@ -377,6 +380,7 @@ public:
     ProcessingWorker* worker = nullptr;
     Preview3DWorker* prev3d = nullptr;
     int proc_done = 0;
+    int failures_ = 0;
 
     NeonifyGUI() {
         setWindowTitle("Neonify");
@@ -437,7 +441,118 @@ public:
         l->addWidget(logo);
         l->addWidget(title);
         l->addStretch();
+        QPushButton* desk_btn = new QPushButton("Desktop neonifier…", h);
+        desk_btn->setStyleSheet("QPushButton{background:#1d1d1d;color:#cccccc;border:1px solid #2f2f2f;"
+                                "border-radius:5px;padding:5px 12px;font-size:12px;}"
+                                "QPushButton:hover{color:#ffffff;border-color:#4a4a4a;}");
+        connect(desk_btn, &QPushButton::clicked, this, &NeonifyGUI::open_desktop_neonifier);
+        l->addWidget(desk_btn);
         return h;
+    }
+
+    // the desktop neonifier settings live in the shared neonify.ini next to
+    // the binary — this dialog edits exactly that file, the overlay process
+    // picks the values up on its next start
+    void open_desktop_neonifier() {
+        QDialog dlg(this);
+        dlg.setWindowTitle("Desktop neonifier");
+        dlg.setMinimumWidth(460);
+        QVBoxLayout* lay = new QVBoxLayout(&dlg);
+        neon::IniFile ini = neon::app_ini();
+        std::vector<neon::IniField> schema = neon::ini_schema();
+        ini.load(schema);
+
+        QLabel* info = new QLabel(
+            QStringLiteral("live overlay over the desktop or the focused window — ctrl+alt+n toggles, "
+                           "ctrl+alt+n then w neonifies the focused window. backend: %1")
+                .arg(QString::fromStdString(ini.get("hardware", "desktop_backend", "none"))), &dlg);
+        info->setWordWrap(true);
+        info->setStyleSheet("color:#888888;font-size:11px;");
+        lay->addWidget(info);
+
+        auto add_row = [&](const char* label_text) -> QComboBox* {
+            QHBoxLayout* r = new QHBoxLayout;
+            r->addWidget(new QLabel(QLatin1String(label_text), &dlg));
+            QComboBox* c = new QComboBox(&dlg);
+            r->addWidget(c, 1);
+            lay->addLayout(r);
+            return c;
+        };
+        QComboBox* mode = add_row("mode");
+        mode->addItem(QStringLiteral("whole desktop"), "desktop");
+        mode->addItem(QStringLiteral("focused window"), "window");
+        mode->setCurrentIndex(mode->findData(QString::fromStdString(ini.get("desktop", "mode", "desktop"))));
+        QComboBox* monitor = add_row("monitor");
+        monitor->addItem(QStringLiteral("primary"), "primary");
+        for (int i = 1; i <= 6; i++) monitor->addItem(QString::number(i), QString::number(i));
+        monitor->setCurrentIndex(monitor->findData(QString::fromStdString(ini.get("desktop", "monitor", "primary"))));
+        if (monitor->currentIndex() < 0) monitor->setCurrentIndex(0);
+        QComboBox* device = add_row("device");
+        device->addItem(QStringLiteral("auto"), "auto");
+        device->addItem(QStringLiteral("gpu"), "gpu");
+        device->addItem(QStringLiteral("cpu"), "cpu");
+        device->setCurrentIndex(device->findData(QString::fromStdString(ini.get("desktop", "device", "auto"))));
+        QComboBox* palette = add_row("palette");
+        for (const char* p : neon::PALETTE_NAMES) palette->addItem(QString::fromLatin1(p));
+        palette->setCurrentText(QString::fromStdString(ini.get("desktop", "palette", "electric")));
+        QComboBox* inside = add_row("original under the effect");
+        inside->addItem(QStringLiteral("wipe — neon on black"), "wipe");
+        inside->addItem(QStringLiteral("keep original, neon only on the edges"), "keep");
+        inside->addItem(QStringLiteral("keep original + global neon glow"), "glow");
+        inside->setCurrentIndex(inside->findData(QString::fromStdString(ini.get("desktop", "inside", "wipe"))));
+
+        auto add_spin = [&](const char* label_text, double lo, double hi, double val, int dec) {
+            QHBoxLayout* r = new QHBoxLayout;
+            r->addWidget(new QLabel(QLatin1String(label_text), &dlg));
+            QDoubleSpinBox* sp = new QDoubleSpinBox(&dlg);
+            sp->setRange(lo, hi);
+            sp->setDecimals(dec);
+            sp->setSingleStep((hi - lo) / 100.0);
+            sp->setValue(val);
+            r->addWidget(sp, 1);
+            lay->addLayout(r);
+            return sp;
+        };
+        QDoubleSpinBox* glow = add_spin("glow", 0.2, 3.0, ini.get_float("desktop", "glow", 1.0f), 2);
+        QDoubleSpinBox* thr = add_spin("edge threshold", 0.02, 0.5, ini.get_float("desktop", "threshold", 0.12f), 3);
+        QDoubleSpinBox* env = add_spin("ambient detail", 0.0, 2.0, ini.get_float("desktop", "env", 1.0f), 2);
+        QDoubleSpinBox* fps = add_spin("fps cap", 5, 60, ini.get_int("desktop", "fps", 30), 0);
+        QDoubleSpinBox* scale = add_spin("process scale", 0.25, 1.0, ini.get_float("desktop", "scale", 1.0f), 2);
+        QCheckBox* hot = new QCheckBox(QStringLiteral("ctrl+alt+n hotkeys active"), &dlg);
+        hot->setChecked(ini.get_bool("desktop", "hotkeys", true));
+        lay->addWidget(hot);
+
+        QDialogButtonBox* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+        lay->addWidget(bb);
+        connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+        connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+        if (dlg.exec() != QDialog::Accepted) return;
+
+        auto setv = [&](const char* k, const std::string& v) { ini.set("desktop", k, v); };
+        setv("mode", mode->currentData().toString().toStdString());
+        setv("monitor", monitor->currentData().toString().toStdString());
+        setv("device", device->currentData().toString().toStdString());
+        setv("palette", palette->currentText().toStdString());
+        setv("inside", inside->currentData().toString().toStdString());
+        setv("glow", std::to_string(glow->value()));
+        setv("threshold", std::to_string(thr->value()));
+        setv("env", std::to_string(env->value()));
+        setv("fps", std::to_string(int(fps->value())));
+        setv("scale", std::to_string(scale->value()));
+        setv("hotkeys", hot->isChecked() ? "1" : "0");
+        ini.save(schema);
+        status->setText(QStringLiteral("desktop neonifier settings saved to neonify.ini"));
+
+        QString bin = QCoreApplication::applicationDirPath() + "/neonify-desktop";
+#ifdef Q_OS_WIN
+        bin += ".exe";
+#endif
+        if (QFile::exists(bin)) {
+            QProcess::startDetached(bin, QStringList());
+            status->setText(QStringLiteral("desktop neonifier running — check the tray icon"));
+        } else {
+            status->setText(QStringLiteral("settings saved — the overlay binary ships next to this app"));
+        }
     }
 
     QWidget* build_inputs_panel() {
@@ -558,8 +673,12 @@ public:
         r2->addWidget(env_v);
         vl->addLayout(r2);
         QHBoxLayout* r3 = new QHBoxLayout;
-        keep_inside = new QCheckBox("keep the original look under the effect (instead of edges only)", vis_section);
-        r3->addWidget(keep_inside);
+        r3->addWidget(new QLabel("original under the effect", vis_section));
+        inside_combo = new QComboBox(vis_section);
+        inside_combo->addItem(QStringLiteral("wipe — neon on black"), 0);
+        inside_combo->addItem(QStringLiteral("keep original, neon only on the edges"), 1);
+        inside_combo->addItem(QStringLiteral("keep original + global neon glow"), 2);
+        r3->addWidget(inside_combo);
         r3->addStretch(1);
         vl->addLayout(r3);
         connect(glow, &QSlider::valueChanged, this, [this] {
@@ -743,10 +862,10 @@ public:
         if (k == KImage) {
             QImage img = load_image_robust(path);
             if (img.isNull()) {
-                QMessageBox::warning(this, "Neonify", "cannot open image:\n" + path);
+                status->setText(QStringLiteral("cannot open image: %1").arg(QFileInfo(path).fileName()));
                 return;
             }
-            viewer->show_image(QPixmap::fromImage(img));
+            viewer->show_image(img);
             center->setCurrentWidget(viewer);
             status->setText("preview: " + QFileInfo(path).fileName());
         } else if (k == KVideo) {
@@ -773,9 +892,11 @@ public:
             });
             connect(prev3d, &Preview3DWorker::preview_failed, this, [this](const QString& msg) {
                 prev3d = nullptr;
-                status->setText("3d preview failed");
-                QMessageBox::warning(this, "Neonify", "3d preview failed:\n" + msg);
+                status->setText(QStringLiteral("3d preview failed: %1").arg(msg));
             });
+            // null the pointer on every finish path — a dangling worker here is
+            // the crash behind the second preview
+            connect(prev3d, &QThread::finished, this, [this] { prev3d = nullptr; });
             connect(prev3d, &QThread::finished, prev3d, &QObject::deleteLater);
             prev3d->start();
         }
@@ -822,7 +943,7 @@ public:
         if (has_orig) a = QPixmap::fromImage(load_image_robust(in));
         b = QPixmap::fromImage(load_image_robust(out));
         if (b.isNull()) {
-            QMessageBox::warning(this, "Neonify", "cannot open result:\n" + out);
+            status->setText(QStringLiteral("cannot open result: %1").arg(QFileInfo(out).fileName()));
             return;
         }
         sbs->set_pair(a, has_orig ? QFileInfo(in).fileName() : QStringLiteral("original removed"),
@@ -847,6 +968,7 @@ public:
         QStringList files = input_paths();
         if (files.isEmpty()) return;
         if (worker && worker->isRunning()) return;
+        failures_ = 0;
 
         neon::Options o;
         o.palette = palette_combo->currentText().toStdString();
@@ -858,7 +980,7 @@ public:
             o.profile = profile_combo->currentText().section(QStringLiteral(" —"), 0, 0).toStdString();
         o.spatial = spatial->isChecked();
         o.neon_audio = neon_audio->isChecked();
-        o.keep_inside = keep_inside->isChecked();
+        o.inside_mode = inside_combo->currentData().toInt();
         o.advanced.params = advanced;
         o.turntable = turn_combo->currentData().toInt();
         o.azimuth = azim->value() * 3.6f;
@@ -884,15 +1006,26 @@ public:
             status->setText(QStringLiteral("[%1] %2").arg(proc_done).arg(QFileInfo(out).fileName()));
         });
         connect(worker, &ProcessingWorker::failed, this, [this](const QString& msg) {
-            QMessageBox::warning(this, "Neonify", msg);
+            // non-blocking on purpose: a modal per failed file freezes batch
+            // runs and makes the app feel dead under fast clicks
+            int n_fail = failures_ + 1;
+            failures_ = n_fail;
+            status->setText(QStringLiteral("failed (%1): %2").arg(n_fail).arg(msg));
         });
         connect(worker, &ProcessingWorker::all_done, this, [this] {
             bar->setValue(100);
-            status->setText(next_to_input->isChecked()
-                                ? QStringLiteral("done — outputs next to the inputs")
-                                : QStringLiteral("done — outputs in results/"));
+            QString done = next_to_input->isChecked()
+                               ? QStringLiteral("done — outputs next to the inputs")
+                               : QStringLiteral("done — outputs in results/");
+            if (failures_ > 0) done += QStringLiteral(" — %1 failed").arg(failures_);
+            status->setText(done);
+            failures_ = 0;
             run_btn->setEnabled(true);
         });
+        // the worker deletes itself, so the member must forget it in the same
+        // breath — a stale pointer here is the crash behind reprocessing and
+        // behind adding inputs after a finished run
+        connect(worker, &QThread::finished, this, [this] { worker = nullptr; });
         connect(worker, &QThread::finished, worker, &QObject::deleteLater);
         status->setText("neonifying…");
         worker->start();

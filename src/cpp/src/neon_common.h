@@ -518,7 +518,8 @@ private:
 #endif
 };
 
-inline bool run_ok(const std::vector<std::string>& argv, std::string* capture = nullptr) {
+inline bool run_ok(const std::vector<std::string>& argv, std::string* capture = nullptr,
+                   bool quiet_stderr = false) {
 #ifdef _WIN32
     SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
     HANDLE orr = nullptr, owr = nullptr;
@@ -529,7 +530,7 @@ inline bool run_ok(const std::vector<std::string>& argv, std::string* capture = 
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput = HANDLE(_get_osfhandle(_fileno(stdin)));
     si.hStdOutput = need ? owr : HANDLE(_get_osfhandle(_fileno(stdout)));
-    si.hStdError = HANDLE(_get_osfhandle(_fileno(stderr)));
+    si.hStdError = quiet_stderr ? nullptr : HANDLE(_get_osfhandle(_fileno(stderr)));
     std::string cmd;
     for (size_t i = 0; i < argv.size(); i++) {
         if (i) cmd += " ";
@@ -541,8 +542,10 @@ inline bool run_ok(const std::vector<std::string>& argv, std::string* capture = 
     std::vector<wchar_t> cmdv(wcmd.begin(), wcmd.end());
     cmdv.push_back(L'\0');
     PROCESS_INFORMATION pi{};
-    BOOL okf = CreateProcessW(nullptr, cmdv.data(), nullptr, nullptr, TRUE,
-                              CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    DWORD flags = CREATE_NO_WINDOW;
+    if (quiet_stderr) flags |= CREATE_DEFAULT_ERROR_MODE;
+    BOOL okf = CreateProcessW(nullptr, cmdv.data(), nullptr, nullptr, quiet_stderr ? FALSE : TRUE,
+                              flags, nullptr, nullptr, &si, &pi);
     if (owr) CloseHandle(owr);
     if (!okf) return false;
     WaitForSingleObject(pi.hProcess, INFINITE);
@@ -559,12 +562,14 @@ inline bool run_ok(const std::vector<std::string>& argv, std::string* capture = 
     CloseHandle(pi.hThread);
     return code == 0;
 #else
-    int op[2] = {-1, -1};
+    int op[2] = {-1, -1}, ep[2] = {-1, -1};
     if (capture && pipe(op) != 0) return false;
+    if (quiet_stderr && pipe(ep) != 0) return false;
     pid_t p = fork();
     if (p < 0) return false;
     if (p == 0) {
         if (capture) { dup2(op[1], 1); close(op[0]); close(op[1]); }
+        if (quiet_stderr) { dup2(ep[1], 2); close(ep[0]); close(ep[1]); }
         std::vector<char*> av;
         for (auto& a : argv) av.push_back(const_cast<char*>(a.c_str()));
         av.push_back(nullptr);
@@ -572,11 +577,17 @@ inline bool run_ok(const std::vector<std::string>& argv, std::string* capture = 
         _exit(127);
     }
     if (op[1] >= 0) close(op[1]);
+    if (ep[1] >= 0) close(ep[1]);
     if (capture) {
         char buf[4096];
         ssize_t n;
         while ((n = read(op[0], buf, sizeof(buf))) > 0) capture->append(buf, n);
         close(op[0]);
+    }
+    if (quiet_stderr) {
+        char buf[4096];
+        while (read(ep[0], buf, sizeof(buf)) > 0) {}
+        close(ep[0]);
     }
     int st = 0;
     waitpid(p, &st, 0);

@@ -1,12 +1,13 @@
-// NEONIFY native — image engine: v1 tube law (sobel ridge + 4-scale glow stack)
-// ported 1:1 from the python reference engine. laws are laws.
+// NEONIFY native — image engine: v1 tube law, ported 1:1 from the old python
+// engine (the pre-cpp reference): /4 sobel, raw-edge 4-scale glow stack,
+// stop-interpolated palette luts, core added in rgb after the lut. laws are laws.
 #pragma once
 
 #include "neon_common.h"
+#include "neon_hw.h"
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <cmath>
-#include <random>
 
 // stb_image: public-domain jpg/png/bmp/gif decoder, vendored so the exe reads
 // every common format even where the opencv build's own codecs misbehave.
@@ -130,23 +131,99 @@ inline bool imwrite_robust(const std::string& path, const cv::Mat& img,
     return write_file_bytes(path, buf.data(), buf.size());
 }
 
-inline const char* PALETTE_NAMES[] = {"electric", "crimson", "ice", "toxic", "violet", "golden", "ghost", "spectrum"};
+// composite law for the original-look family (the owner's round-7 wording):
+//   INSIDE_WIPE  — classic wiped neon, art lands on near-black (palette floor)
+//   INSIDE_KEEP  — non-edges stay the original pixels, neon + a local halo sit
+//                  on the edges; no global wash over the media
+//   INSIDE_GLOW  — the whole original stays under the full global glow field
+inline const int INSIDE_WIPE = 0;
+inline const int INSIDE_KEEP = 1;
+inline const int INSIDE_GLOW = 2;
+
+inline const char* PALETTE_NAMES[] = {"electric", "synthwave", "toxic", "ice", "fire", "ghost", "spectrum"};
 inline constexpr float GLOW_SIGMAS[4] = {2.0f, 6.0f, 16.0f, 38.0f};
 inline constexpr float GLOW_WEIGHTS[4] = {0.9f, 0.62f, 0.45f, 0.32f};
+
+// gaussian with zero padding — the reference conv2d pads with zeros, replicate
+// would brighten frame borders and change the feel
+// the ini + bench decide where the math runs; any gpu failure falls back to
+// the cpu path in the same call — the output law never changes, only the device
+inline bool engine_gpu_ready(int64_t pixels) {
+    try {
+        return engine_use_gpu(app_ini(), pixels) && cv::ocl::haveOpenCL() && cv::ocl::useOpenCL();
+    } catch (const cv::Exception&) {
+        return false;
+    }
+}
 
 inline cv::Mat gaussian_blur(const cv::Mat& img, float sigma) {
     if (sigma <= 0.05f) return img;
     int k = int(std::ceil(sigma * 3.0f)) * 2 + 1;
     cv::Mat out;
-    cv::GaussianBlur(img, out, cv::Size(k, k), sigma, sigma, cv::BORDER_REPLICATE);
+    cv::GaussianBlur(img, out, cv::Size(k, k), sigma, sigma, cv::BORDER_CONSTANT);
     return out;
+}
+
+// wide_blur law: sigma >= 12 goes through a quarter-scale round trip
+inline cv::Mat wide_blur(const cv::Mat& t, float sigma) {
+    if (sigma >= 12.0f) {
+        cv::Mat small, out;
+        cv::resize(t, small, cv::Size(), 0.25, 0.25, cv::INTER_LINEAR);
+        small = gaussian_blur(small, sigma * 0.25f);
+        cv::resize(small, out, t.size(), 0, 0, cv::INTER_LINEAR);
+        return out;
+    }
+    return gaussian_blur(t, sigma);
+}
+
+inline cv::UMat wide_blur_gpu(const cv::UMat& t, float sigma) {
+    if (sigma >= 12.0f) {
+        cv::UMat small, out;
+        cv::resize(t, small, cv::Size(), 0.25, 0.25, cv::INTER_LINEAR);
+        int k = int(std::ceil(sigma * 0.25f * 3.0f)) * 2 + 1;
+        cv::GaussianBlur(small, small, cv::Size(k, k), sigma * 0.25f, sigma * 0.25f, cv::BORDER_CONSTANT);
+        cv::resize(small, out, t.size(), 0, 0, cv::INTER_LINEAR);
+        return out;
+    }
+    int k = int(std::ceil(sigma * 3.0f)) * 2 + 1;
+    cv::UMat out;
+    cv::GaussianBlur(t, out, cv::Size(k, k), sigma, sigma, cv::BORDER_CONSTANT);
+    return out;
+}
+
+// the gpu paths use only the explicit (InputArray, InputArray, OutputArray)
+// forms — the umat expression operators are not part of the stable surface
+inline cv::UMat const_like(const cv::UMat& x, double v) {
+    return cv::UMat(x.size(), x.type(), cv::Scalar::all(v));
+}
+
+inline cv::UMat smoothstep_gpu(const cv::UMat& x, float lo, float hi) {
+    float denom = std::max(1e-6f, hi - lo);
+    cv::UMat t, a, t2, three, two;
+    cv::subtract(x, const_like(x, lo), t);
+    cv::multiply(t, const_like(t, 1.0 / denom), t);
+    cv::min(t, const_like(t, 1.0), a);
+    cv::max(a, const_like(a, 0.0), a);
+    cv::multiply(a, a, t2);
+    cv::multiply(t2, const_like(t2, 3.0), three);
+    cv::multiply(t2, a, two);
+    cv::multiply(two, const_like(two, 2.0), two);
+    cv::subtract(three, two, t);
+    return t;
+}
+
+inline cv::UMat clamp01_gpu(const cv::UMat& x) {
+    cv::UMat a;
+    cv::min(x, const_like(x, 1.0), a);
+    cv::max(a, const_like(a, 0.0), a);
+    return a;
 }
 
 inline cv::Mat luminance(const cv::Mat& img) {
     if (img.channels() == 1) return img;
     cv::Mat f, out;
     img.convertTo(f, CV_32F);
-    cv::transform(f, out, cv::Matx13f(0.114f, 0.587f, 0.299f));
+    cv::transform(f, out, cv::Matx13f(0.0722f, 0.7152f, 0.2126f));
     return out;
 }
 
@@ -159,60 +236,93 @@ inline cv::Mat smoothstep(float lo, float hi, const cv::Mat& x) {
     return out;
 }
 
+// palette luts 1:1 with the old python stop tables (rgb, np.interp law)
+struct PaletteStop { float p; float r, g, b; };
+
+inline const std::vector<PaletteStop>& palette_stops(const std::string& name) {
+    static const std::vector<PaletteStop> electric = {
+        {0.00f, 0.004f, 0.010f, 0.045f}, {0.28f, 0.05f, 0.25f, 0.85f},
+        {0.58f, 0.15f, 0.72f, 1.00f}, {0.84f, 0.60f, 0.95f, 1.00f},
+        {1.00f, 1.00f, 1.00f, 1.00f}};
+    static const std::vector<PaletteStop> synthwave = {
+        {0.00f, 0.040f, 0.004f, 0.060f}, {0.30f, 0.45f, 0.08f, 0.75f},
+        {0.60f, 0.98f, 0.20f, 0.60f}, {0.85f, 1.00f, 0.50f, 0.45f},
+        {1.00f, 1.00f, 0.96f, 0.88f}};
+    static const std::vector<PaletteStop> toxic = {
+        {0.00f, 0.004f, 0.035f, 0.012f}, {0.30f, 0.05f, 0.50f, 0.12f},
+        {0.64f, 0.35f, 0.95f, 0.20f}, {1.00f, 0.90f, 1.00f, 0.80f}};
+    static const std::vector<PaletteStop> ice = {
+        {0.00f, 0.004f, 0.012f, 0.024f}, {0.35f, 0.10f, 0.30f, 0.55f},
+        {0.70f, 0.55f, 0.80f, 0.95f}, {1.00f, 1.00f, 1.00f, 1.00f}};
+    static const std::vector<PaletteStop> fire = {
+        {0.00f, 0.035f, 0.005f, 0.002f}, {0.30f, 0.55f, 0.08f, 0.02f},
+        {0.64f, 1.00f, 0.45f, 0.05f}, {0.88f, 1.00f, 0.80f, 0.30f},
+        {1.00f, 1.00f, 1.00f, 0.92f}};
+    static const std::vector<PaletteStop> ghost = {
+        {0.00f, 0.012f, 0.012f, 0.014f}, {0.40f, 0.35f, 0.35f, 0.38f},
+        {0.75f, 0.75f, 0.78f, 0.82f}, {1.00f, 1.00f, 1.00f, 1.00f}};
+    static const std::vector<PaletteStop> empty;
+    if (name == "electric") return electric;
+    if (name == "synthwave") return synthwave;
+    if (name == "toxic") return toxic;
+    if (name == "ice") return ice;
+    if (name == "fire") return fire;
+    if (name == "ghost") return ghost;
+    return empty;
+}
+
+inline void hsv_to_rgb_bgr(float h, float s, float v, float& b, float& g, float& r) {
+    h = h - std::floor(h);
+    float h6 = h * 6.0f;
+    int i = int(h6) % 6;
+    float f = h6 - std::floor(h6);
+    float p = v * (1.0f - s);
+    float q = v * (1.0f - s * f);
+    float t = v * (1.0f - s * (1.0f - f));
+    float rr, gg, bb;
+    switch (i) {
+        case 0: rr = v; gg = t; bb = p; break;
+        case 1: rr = q; gg = v; bb = p; break;
+        case 2: rr = p; gg = v; bb = t; break;
+        case 3: rr = p; gg = q; bb = v; break;
+        case 4: rr = t; gg = p; bb = v; break;
+        default: rr = v; gg = p; bb = q; break;
+    }
+    b = bb; g = gg; r = rr;
+}
+
 inline cv::Mat build_palette_lut(const std::string& name, int n = 256) {
-    cv::Mat lut(n, 1, CV_32FC3);
+    cv::Mat lut(n, 1, CV_8UC3);
+    if (name == "spectrum") {
+        for (int i = 0; i < n; i++) {
+            float b, g, r;
+            hsv_to_rgb_bgr(float(i) / float(n - 1), 0.9f, 1.0f, b, g, r);
+            lut.at<cv::Vec3b>(i) = cv::Vec3b(
+                uint8_t(b * 255.0f + 0.5f), uint8_t(g * 255.0f + 0.5f), uint8_t(r * 255.0f + 0.5f));
+        }
+        return lut;
+    }
+    const std::vector<PaletteStop>& stops = palette_stops(name);
     for (int i = 0; i < n; i++) {
         float t = float(i) / float(n - 1);
-        float r, g, b;
-        if (name == "crimson") {
-            r = 0.15f + 0.85f * t;
-            g = 0.02f * std::pow(t, 2.2f);
-            b = 0.08f + 0.25f * std::pow(t, 3.0f) * (1 - t) * 2;
-        } else if (name == "ice") {
-            r = 0.45f * std::pow(t, 2.5f);
-            g = 0.55f + 0.45f * std::pow(t, 1.6f);
-            b = 0.65f + 0.35f * t;
-        } else if (name == "toxic") {
-            r = 0.45f * std::pow(t, 3.2f);
-            g = 0.25f + 0.75f * t;
-            b = 0.06f * std::pow(t, 1.4f);
-        } else if (name == "violet") {
-            r = 0.35f + 0.65f * std::pow(t, 1.3f);
-            g = 0.04f + 0.22f * std::pow(t, 2.8f);
-            b = 0.55f + 0.45f * t;
-        } else if (name == "golden") {
-            r = 0.55f + 0.45f * t;
-            g = 0.32f * std::pow(t, 0.7f) + 0.12f * std::pow(t, 2.0f);
-            b = 0.02f * std::pow(t, 2.4f);
-        } else if (name == "ghost") {
-            r = 0.62f + 0.38f * std::pow(t, 1.8f);
-            g = 0.68f + 0.32f * std::pow(t, 1.4f);
-            b = 0.78f + 0.22f * t;
-        } else if (name == "spectrum") {
-            float h = t * 6.0f;
-            int i = int(std::fmod(h, 6.0f));
-            float f = h - std::floor(h);
-            float p = 0.1f, q = 0.1f + 0.9f * (1.0f - f), tt = 0.1f + 0.9f * f;
-            float rr, gg, bb;
-            switch (i) {
-                case 0: rr = 1.0f; gg = tt; bb = p; break;
-                case 1: rr = q; gg = 1.0f; bb = p; break;
-                case 2: rr = p; gg = 1.0f; bb = tt; break;
-                case 3: rr = p; gg = q; bb = 1.0f; break;
-                case 4: rr = tt; gg = p; bb = 1.0f; break;
-                default: rr = 1.0f; gg = p; bb = q; break;
-            }
-            r = rr; g = gg; b = bb;
+        float r = stops.back().r, g = stops.back().g, b = stops.back().b;
+        if (t <= stops.front().p) {
+            r = stops.front().r; g = stops.front().g; b = stops.front().b;
         } else {
-            r = 0.85f * std::pow(t, 3.4f);
-            g = 0.25f + 0.75f * std::pow(t, 1.25f);
-            b = 0.10f + 0.90f * std::pow(t, 0.55f);
+            for (size_t s = 1; s < stops.size(); s++) {
+                if (t <= stops[s].p) {
+                    float u = (t - stops[s - 1].p) / std::max(1e-6f, stops[s].p - stops[s - 1].p);
+                    r = stops[s - 1].r + (stops[s].r - stops[s - 1].r) * u;
+                    g = stops[s - 1].g + (stops[s].g - stops[s - 1].g) * u;
+                    b = stops[s - 1].b + (stops[s].b - stops[s - 1].b) * u;
+                    break;
+                }
+            }
         }
-        lut.at<cv::Vec3f>(i) = cv::Vec3f(b, g, r);
+        lut.at<cv::Vec3b>(i) = cv::Vec3b(
+            uint8_t(b * 255.0f + 0.5f), uint8_t(g * 255.0f + 0.5f), uint8_t(r * 255.0f + 0.5f));
     }
-    cv::Mat out;
-    lut.convertTo(out, CV_8UC3, 255.0);
-    return out;
+    return lut;
 }
 
 inline const cv::Mat& palette_lut(const std::string& name) {
@@ -222,122 +332,107 @@ inline const cv::Mat& palette_lut(const std::string& name) {
     return it->second;
 }
 
-inline float noise_estimate(const cv::Mat& lum) {
-    cv::Mat lap;
-    cv::Laplacian(lum, lap, CV_32F, 3);
-    std::vector<float> v;
-    v.reserve((size_t)lap.total());
-    for (int y = 0; y < lap.rows; y++) {
-        const float* row = lap.ptr<float>(y);
-        for (int x = 0; x < lap.cols; x++) v.push_back(std::fabs(row[x]));
-    }
-    if (v.empty()) return 0.f;
-    size_t mid = v.size() / 2;
-    std::nth_element(v.begin(), v.begin() + mid, v.end());
-    return v[mid] / 0.6745f;
-}
-
-inline cv::Mat support_mask(const cv::Mat& lum, float radius) {
-    cv::Mat g = gaussian_blur(lum, radius);
-    cv::Mat gx, gy;
-    cv::Sobel(g, gx, CV_32F, 1, 0, 3);
-    cv::Sobel(g, gy, CV_32F, 0, 1, 3);
-    cv::Mat grad;
-    cv::sqrt(gx.mul(gx) + gy.mul(gy), grad);
-    int k = int(radius * 2) * 2 + 1;
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(k, k));
-    cv::Mat support;
-    cv::dilate(grad, support, kernel);
-    std::vector<float> v;
-    v.reserve((size_t)support.total());
-    for (int y = 0; y < support.rows; y++) {
-        const float* row = support.ptr<float>(y);
-        for (int x = 0; x < support.cols; x++) v.push_back(row[x]);
-    }
-    size_t idx = size_t(v.size() * 0.92);
-    std::nth_element(v.begin(), v.begin() + std::min(idx, v.size() - 1), v.end());
-    float hi = v[std::min(idx, v.size() - 1)];
-    if (hi < 1e-5f) return cv::Mat::zeros(support.size(), CV_32F);
-    return smoothstep(hi * 0.12f, hi * 0.55f, support);
-}
-
-inline cv::Mat sobel_mag(const cv::Mat& lum) {
-    cv::Mat gx, gy;
-    cv::Sobel(lum, gx, CV_32F, 1, 0, 3);
-    cv::Sobel(lum, gy, CV_32F, 0, 1, 3);
-    cv::Mat out;
-    cv::sqrt(gx.mul(gx) + gy.mul(gy), out);
-    return out / 255.0f;
-}
-
 struct EdgeAux {
     float noise = 0.f;
     float pre_sigma = 0.f;
 };
 
+// edge law 1:1 with the reference: luminance, one gaussian (sigma 1), sobel
+// normalized by /4 like the torch kernel, smoothstep(threshold, threshold+0.22).
+// no noise adaptation, no support mask — the old feel comes from exactly this.
 inline void edge_field(const cv::Mat& img_bgr, float glow, float threshold, float env,
                        cv::Mat& edges, EdgeAux& aux, cv::Mat* ang_out = nullptr) {
     (void)glow; (void)env;
     cv::Mat lum = luminance(img_bgr);
-    float noise = noise_estimate(lum);
-    float pre_sigma = std::min(2.4f, std::max(0.0f, (noise - 2.0f) * 0.16f));
-    cv::Mat work = (pre_sigma > 0.05f) ? gaussian_blur(lum, pre_sigma) : lum;
-    cv::Mat base = gaussian_blur(work, 1.0f);
+    if (engine_gpu_ready(int64_t(lum.total()))) {
+        try {
+            cv::UMat u = lum.getUMat(cv::ACCESS_READ);
+            cv::UMat base, gx, gy, mag, ang;
+            cv::GaussianBlur(u, base, cv::Size(7, 7), 1.0, 1.0, cv::BORDER_CONSTANT);
+            cv::Sobel(base, gx, CV_32F, 1, 0, 3, 1, 0, cv::BORDER_CONSTANT);
+            cv::Sobel(base, gy, CV_32F, 0, 1, 3, 1, 0, cv::BORDER_CONSTANT);
+            cv::UMat gx2, gy2;
+            cv::multiply(gx, gx, gx2);
+            cv::multiply(gy, gy, gy2);
+            cv::add(gx2, gy2, mag);
+            cv::sqrt(mag, mag);
+            cv::multiply(mag, const_like(mag, 1.0 / (4.0 * 255.0)), mag);
+            cv::phase(gx, gy, ang, false);
+            edges = smoothstep_gpu(mag, threshold, threshold + 0.22f).getMat(cv::ACCESS_READ);
+            if (ang_out) *ang_out = ang.getMat(cv::ACCESS_READ);
+            aux.noise = 0.f;
+            aux.pre_sigma = 0.f;
+            return;
+        } catch (const cv::Exception&) {
+            cv::ocl::setUseOpenCL(false);
+        }
+    }
+    cv::Mat base = gaussian_blur(lum, 1.0f);
     cv::Mat gx, gy;
-    cv::Sobel(base, gx, CV_32F, 1, 0, 3);
-    cv::Sobel(base, gy, CV_32F, 0, 1, 3);
+    cv::Sobel(base, gx, CV_32F, 1, 0, 3, 1, 0, cv::BORDER_CONSTANT);
+    cv::Sobel(base, gy, CV_32F, 0, 1, 3, 1, 0, cv::BORDER_CONSTANT);
     cv::Mat mag;
     cv::sqrt(gx.mul(gx) + gy.mul(gy), mag);
-    mag = mag / 255.0f;
+    mag = mag / (4.0f * 255.0f);
     if (ang_out) {
         cv::Mat ang;
         cv::phase(gx, gy, ang, false);
         *ang_out = ang;
     }
-    float thr = threshold * (1.0f + pre_sigma * 0.38f);
-    cv::Mat edge = smoothstep(thr, thr + 0.22f, mag);
-    cv::Mat sup = support_mask(work, 1.0f + pre_sigma);
-    edge = edge.mul(smoothstep(0.04f, 0.30f, sup));
-    edges = edge;
-    aux.noise = noise;
-    aux.pre_sigma = pre_sigma;
+    edges = smoothstep(threshold, threshold + 0.22f, mag);
+    aux.noise = 0.f;
+    aux.pre_sigma = 0.f;
 }
 
-inline float edge_density(const cv::Mat& edges) {
-    int64_t cnt = 0;
-    for (int y = 0; y < edges.rows; y++) {
-        const float* row = edges.ptr<float>(y);
-        for (int x = 0; x < edges.cols; x++)
-            if (row[x] > 0.35f) cnt++;
-    }
-    return float(cnt) / float(std::max<int64_t>(1, (int64_t)edges.total()));
-}
-
-inline void neon_glow_stack(const cv::Mat& img_bgr, const cv::Mat& edges,
-                            float glow, float env, float threshold,
-                            cv::Mat& energy) {
-    (void)img_bgr; (void)threshold;
+// glow stack 1:1 with the reference: raw edge blurred at the four sigmas,
+// energy = (edge*1.15 + glow*0.85) * excite. the core is not folded in here —
+// the reference adds it in rgb after the lut (see process_image_neon).
+inline void neon_glow_stack(const cv::Mat& edges, float glow, float env, cv::Mat& energy) {
     float g = std::min(3.0f, std::max(0.1f, glow));
-    float density = edge_density(edges);
-    float calm = 1.0f / (1.0f + 3.5f * std::max(0.0f, density - 0.18f));
-    cv::Mat hot;
-    cv::min(edges * 1.25, 1.0, hot);
-    cv::Mat src = edges.mul(1.0 - 0.55 * hot);
-    cv::Mat glow_field = cv::Mat::zeros(edges.size(), CV_32F);
-    for (int i = 0; i < 4; i++) {
-        cv::Mat b = gaussian_blur(src, GLOW_SIGMAS[i]);
-        glow_field += b * (GLOW_WEIGHTS[i] * g * env * calm);
+    if (engine_gpu_ready(int64_t(edges.total()))) {
+        try {
+            cv::UMat e = edges.getUMat(cv::ACCESS_READ);
+            cv::UMat glow_field = cv::UMat::zeros(e.size(), CV_32F);
+            for (int i = 0; i < 4; i++) {
+                cv::UMat b, term;
+                b = wide_blur_gpu(e, GLOW_SIGMAS[i]);
+                cv::multiply(b, const_like(b, GLOW_WEIGHTS[i] * g * env), term);
+                cv::add(glow_field, term, glow_field);
+            }
+            float excite = 0.72f + 0.42f * env;
+            cv::UMat e2, f2, sum;
+            cv::multiply(e, const_like(e, 1.15f * excite), e2);
+            cv::multiply(glow_field, const_like(glow_field, 0.85f * excite), f2);
+            cv::add(e2, f2, sum);
+            energy = clamp01_gpu(sum).getMat(cv::ACCESS_READ);
+            return;
+        } catch (const cv::Exception&) {
+            cv::ocl::setUseOpenCL(false);
+        }
     }
+    cv::Mat glow_field = cv::Mat::zeros(edges.size(), CV_32F);
+    for (int i = 0; i < 4; i++)
+        glow_field += wide_blur(edges, GLOW_SIGMAS[i]) * (GLOW_WEIGHTS[i] * g * env);
     float excite = 0.72f + 0.42f * env;
     energy = (edges * 1.15 + glow_field * 0.85) * excite;
     cv::min(cv::max(energy, 0.f), 1.f, energy);
-    cv::Mat core;
-    cv::pow(edges, 1.2, core);
-    energy += core * (0.85 * 0.55);
-    cv::min(cv::max(energy, 0.f), 1.f, energy);
 }
 
-inline cv::Mat colorize(const cv::Mat& field, const std::string& palette, float lift = 0.0f) {
+// rgb-space core law: pow(edge, 1.2) * 0.85 * 0.55, added after colorizing —
+// three channels so it lands on the bgr art directly
+inline cv::Mat neon_core_u8(const cv::Mat& edges) {
+    cv::Mat core;
+    cv::pow(edges, 1.2, core);
+    core = core * (0.85f * 0.55f * 255.0f);
+    cv::min(cv::max(core, 0.f), 255.f, core);
+    cv::Mat core8;
+    core.convertTo(core8, CV_8U);
+    cv::Mat chs[3] = {core8, core8, core8}, out;
+    cv::merge(chs, 3, out);
+    return out;
+}
+
+inline cv::Mat colorize(const cv::Mat& field, const std::string& palette) {
     const cv::Mat& lut = palette_lut(palette);
     cv::Mat x;
     if (field.channels() == 1) x = field;
@@ -353,16 +448,16 @@ inline cv::Mat colorize(const cv::Mat& field, const std::string& palette, float 
     cv::Mat idx_chs[3] = {idx8, idx8, idx8};
     cv::merge(idx_chs, 3, idx3);
     cv::LUT(idx3, lut, col);
-    col.convertTo(out, CV_32F);
-    if (lift > 0) out += lift * 255.0f * 0.045f;
-    cv::Mat out8;
-    out.convertTo(out8, CV_8U, 1.0);
-    return out8;
+    return col;
 }
 
-// the rainbow law: edge direction paints the hue, energy paints the value
+// the rainbow law 1:1 with the reference: hue from the edge angle — the
+// reference computes ((atan2 + pi) / 2pi) mod 1, and cv::phase already hands
+// back atan2 wrapped into [0, 2pi), so the shift is +0.5 of a turn — value
+// from the raw energy (no 0.15 floor — energy 0 stays black), then the core add
 inline cv::Mat spectrum_colorize(const cv::Mat& field, const cv::Mat& ang) {
     cv::Mat hue = ang / (2.0f * float(M_PI));
+    hue += 0.5f;
     int rows = field.rows, cols = field.cols;
     cv::Mat out(rows, cols, CV_8UC3);
     for (int y = 0; y < rows; y++) {
@@ -371,24 +466,8 @@ inline cv::Mat spectrum_colorize(const cv::Mat& field, const cv::Mat& ang) {
         uint8_t* orow = out.ptr<uint8_t>(y);
         for (int x = 0; x < cols; x++) {
             float e = std::min(1.0f, std::max(0.0f, fr[x]));
-            float h = ar[x] - std::floor(ar[x]);
-            float v = 0.15f + 0.85f * e;
-            float s = 0.9f;
-            float hf = h * 6.0f;
-            int i = int(hf) % 6;
-            float f = hf - std::floor(hf);
-            float p = v * (1.0f - s);
-            float q = v * (1.0f - s * f);
-            float t = v * (1.0f - s * (1.0f - f));
-            float r, g, b;
-            switch (i) {
-                case 0: r = v; g = t; b = p; break;
-                case 1: r = q; g = v; b = p; break;
-                case 2: r = p; g = v; b = t; break;
-                case 3: r = p; g = q; b = v; break;
-                case 4: r = t; g = p; b = v; break;
-                default: r = v; g = p; b = q; break;
-            }
+            float b, g, r;
+            hsv_to_rgb_bgr(ar[x], 0.9f, e, b, g, r);
             orow[x * 3 + 0] = uint8_t(b * 255.0f + 0.5f);
             orow[x * 3 + 1] = uint8_t(g * 255.0f + 0.5f);
             orow[x * 3 + 2] = uint8_t(r * 255.0f + 0.5f);
@@ -404,25 +483,40 @@ inline void process_image_neon(const cv::Mat& img_bgr, const std::string& palett
     cv::Mat edges, ang;
     edge_field(img_bgr, glow, threshold, env, edges, aux, &ang);
     cv::Mat field;
-    neon_glow_stack(img_bgr, edges, glow, env, threshold, field);
+    neon_glow_stack(edges, glow, env, field);
     out = (palette == "spectrum") ? spectrum_colorize(field, ang) : colorize(field, palette);
+    cv::Mat core = neon_core_u8(edges);
+    cv::add(out, core, out);
     if (field_out) *field_out = field;
     if (edges_out) *edges_out = edges;
 }
 
-// keep-inside law (owner's round-6 wording): nothing is wiped. the whole
-// original look stays under the effect; wherever the glow is strong the neon
-// takes over, everywhere else the original pixels survive untouched
-inline void keep_inside_composite(cv::Mat& neon_out, const cv::Mat& orig_bgr,
-                                  const cv::Mat& edges, const cv::Mat& field) {
-    if (neon_out.empty() || orig_bgr.empty() || edges.empty() || field.empty()) return;
-    cv::Mat m;
-    cv::max(field, edges * 0.85, m);
+// keep law: the original pixels stay wherever the mask is dark; the neon art
+// takes over where the edges (plus a tight local halo) live. no global wash.
+inline cv::Mat keep_mask(const cv::Mat& edges) {
+    cv::Mat halo = wide_blur(edges, 6.0f) * 0.55f;
+    cv::Mat m = edges * 1.15f + halo;
     cv::min(cv::max(m, 0.f), 1.f, m);
     cv::Mat soft;
     cv::GaussianBlur(m, soft, cv::Size(0, 0), 0.8, 0.8, cv::BORDER_REPLICATE);
+    return soft;
+}
+
+inline void keep_inside_composite(cv::Mat& neon_out, const cv::Mat& orig_bgr,
+                                  const cv::Mat& edges, const cv::Mat& field, int mode) {
+    if (neon_out.empty() || orig_bgr.empty() || edges.empty()) return;
+    if (mode == INSIDE_WIPE) return;
+    cv::Mat m;
+    if (mode == INSIDE_GLOW) {
+        if (field.empty()) return;
+        cv::max(field, edges * 0.85f, m);
+        cv::min(cv::max(m, 0.f), 1.f, m);
+        cv::GaussianBlur(m, m, cv::Size(0, 0), 0.8, 0.8, cv::BORDER_REPLICATE);
+    } else {
+        m = keep_mask(edges);
+    }
     cv::Mat m3;
-    cv::Mat chs[3] = {soft, soft, soft};
+    cv::Mat chs[3] = {m, m, m};
     cv::merge(chs, 3, m3);
     cv::Mat orig32, out32;
     orig_bgr.convertTo(orig32, CV_32F);
@@ -434,7 +528,7 @@ inline void keep_inside_composite(cv::Mat& neon_out, const cv::Mat& orig_bgr,
 inline std::string neonize_image_file(const std::string& inp, const std::string& out_path,
                                       const std::string& palette, float glow,
                                       float threshold, float env, StageTracker* tracker,
-                                      EdgeAux* aux_out = nullptr, bool keep_inside = false) {
+                                      EdgeAux* aux_out = nullptr, int inside_mode = INSIDE_WIPE) {
     cv::Mat img = imread_robust(inp, cv::IMREAD_UNCHANGED);
     if (img.empty()) img = imread_robust(inp, cv::IMREAD_COLOR);
     if (img.empty()) throw std::runtime_error("cannot read image: " + inp);
@@ -469,8 +563,16 @@ inline std::string neonize_image_file(const std::string& inp, const std::string&
     cv::Mat out, field, edges;
     process_image_neon(bgr, palette, glow, threshold, env, out, aux, &field, &edges);
     trace("engine: neon done");
+    if (std::getenv("NEONIFY_DEBUG_DUMP")) {
+        cv::Mat e16, f16;
+        edges.convertTo(e16, CV_16U, 65535.0);
+        field.convertTo(f16, CV_16U, 65535.0);
+        cv::imwrite("/tmp/neonify_debug_edges.png", e16);
+        cv::imwrite("/tmp/neonify_debug_field.png", f16);
+        cv::imwrite("/tmp/neonify_debug_out.png", out);
+    }
     if (tracker) tracker->begin_stage(1);
-    if (keep_inside) keep_inside_composite(out, bgr, edges, field);
+    if (inside_mode != INSIDE_WIPE) keep_inside_composite(out, bgr, edges, field, inside_mode);
     if (!alpha8.empty()) {
         // alpha law: transparency comes only from the source art. wiped pixels
         // stay (dark), transparent pixels stay transparent — nothing else.

@@ -417,6 +417,7 @@ inline std::string output_for_arg(const std::string& inp, const std::string& out
     if (is_folder) {
         std::string dir = out_arg;
         if (!dir.empty() && dir.back() != '/' && dir.back() != '\\') dir += "/";
+        make_dir(dir);  // a custom folder the user named must come to life
         return dir + out_default(inp, tag, ext);
     }
     return out_arg;
@@ -460,12 +461,12 @@ inline std::string run_one(const std::string& inp, const std::string& out_path,
         if (is_ext(inp, {".mp4", ".avi", ".mkv", ".mov", ".webm", ".gif"})) {
             auto r = process_video_file(inp, out_path, o.palette, o.glow, o.threshold, o.env,
                                         o.profile, o.spatial, o.neon_audio, o.advanced, tr,
-                                        o.keep_inside);
+                                        o.inside_mode, o.hwaccel);
             return r.first;
         }
         EdgeAux aux;
         return neonize_image_file(inp, out_path, o.palette, o.glow, o.threshold, o.env, tr, &aux,
-                                  o.keep_inside);
+                                  o.inside_mode);
     }
     if (command == "audio") {
         std::string prof = o.profile.empty() ? "slash" : o.profile;
@@ -693,9 +694,19 @@ inline int interactive_mode(bool ffmpeg_ok) {
         o.glow = ask_glow();
         o.threshold = ask_threshold();
         o.env = ask_float("Ambient detail", 1.0f, 0.0f, 2.0f);
-        if (!images.empty() || !videos.empty())
-            o.keep_inside = trim(ask_line(
-                "\nKeep the original look under the effect (instead of edges only) [y/N]: ")) == "y";
+        if (!images.empty() || !videos.empty()) {
+            std::printf("\nKeep the original under the effect (instead of wiping to black):\n");
+            std::printf("  1. no - wipe, neon on black (default)\n");
+            std::printf("  2. keep original, neon only on the edges\n");
+            std::printf("  3. keep original + global neon glow\n");
+            while (true) {
+                std::string pick = ask_line("\nSelect keep mode (1-3, default 1): ");
+                if (pick.empty() || pick == "1") { o.inside_mode = 0; break; }
+                if (pick == "2") { o.inside_mode = 1; break; }
+                if (pick == "3") { o.inside_mode = 2; break; }
+                std::printf("Invalid choice '%s'. Please enter 1, 2, or 3.\n", pick.c_str());
+            }
+        }
         if (!videos.empty()) {
             section("VIDEO SETTINGS");
             o.spatial = trim(ask_line("\nSpatial glow (stereo \xe2\x86\x92 direction) [Y/n]: ")) != "n";
@@ -749,48 +760,54 @@ inline int interactive_mode(bool ffmpeg_ok) {
         section("OUTPUT SETTINGS");
         std::printf("\n  1. results folder (default)\n");
         std::printf("  2. next to each input\n");
+        std::printf("  3. custom path\n");
+        int loc = 1;
         while (true) {
-            std::string pick = ask_line("\nSelect output location (1-2, default 1): ");
-            if (pick.empty() || pick == "1") { o.next_to_input = false; break; }
-            if (pick == "2") { o.next_to_input = true; break; }
-            std::printf("Invalid choice '%s'. Please enter 1 or 2.\n", pick.c_str());
+            std::string pick = ask_line("\nSelect output location (1-3, default 1): ");
+            if (pick.empty() || pick == "1") { loc = 1; break; }
+            if (pick == "2") { loc = 2; break; }
+            if (pick == "3") { loc = 3; break; }
+            std::printf("Invalid choice '%s'. Please enter 1, 2, or 3.\n", pick.c_str());
         }
-        std::printf("\nPress Enter for auto-default, or enter custom path.\n");
-        std::printf("For folders: outputs to that folder with the auto name.\n");
-        std::printf("For files: outputs exactly to that path.\n\n");
-        std::map<std::string, std::string> custom_out;
-        std::vector<std::string> singles;
-        for (const auto& f : files)
-            if (!is_dir(f)) singles.push_back(f);
-        for (size_t i = 0; i < singles.size(); i++) {
-            const std::string& f = singles[i];
-            std::string command = is_ext(f, {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma"})
-                                      ? "audio"
-                                      : (is_ext(f, {".obj", ".ply", ".stl"}) ? "mesh" : "neon");
-            auto te = tag_and_ext_for(command, f, o);
-            std::string auto_out = default_output_for(f, te.first, te.second, o.next_to_input);
-            std::printf("[%d/%d] \"%s\"\n", int(i + 1), int(singles.size()), base_name(f).c_str());
-            std::printf("  Auto: %s\n", auto_out.c_str());
-            std::string user_out = ask_line("> ");
-            if (!user_out.empty())
-                custom_out[f] = output_for_arg(f, unquote(user_out), te.first, te.second, o.next_to_input);
-            else
-                custom_out[f] = auto_out;
+        std::string custom_arg;
+        if (loc == 3) {
+            std::printf("\nEnter output path.\n");
+            std::printf("For folders: outputs to that folder with the auto name.\n");
+            std::printf("For files: outputs exactly to that path (single input).\n");
+            while (true) {
+                custom_arg = unquote(ask_line("\nOutput path: "));
+                if (!custom_arg.empty()) break;
+                std::printf("A path is required for the custom location.\n");
+            }
+        }
+        o.next_to_input = (loc == 2);
+        o.output = (loc == 3) ? custom_arg : std::string();
+
+        // a file path with several inputs cannot hold every result exactly —
+        // fall back to folder semantics so nothing lands on top of anything
+        if (loc == 3 && files.size() > 1 && !is_dir(custom_arg)) {
+            auto dot = custom_arg.find_last_of('.');
+            auto slash = custom_arg.find_last_of("/\\");
+            bool has_ext = dot != std::string::npos && (slash == std::string::npos || dot > slash);
+            if (has_ext) {
+                std::string parent = (slash == std::string::npos) ? std::string(".")
+                                                                  : custom_arg.substr(0, slash);
+                make_dir(parent);
+                custom_arg = parent;
+                o.output = parent;
+                std::printf("\nseveral inputs — '%s' acts as the output folder\n", parent.c_str());
+            }
         }
 
         std::vector<std::pair<std::string, std::string>> neon_pairs, audio_pairs, mesh_pairs;
+        std::printf("\nOutput mapping:\n");
         for (const auto& f : files) {
             std::string command = is_ext(f, {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma"})
                                       ? "audio"
                                       : (is_ext(f, {".obj", ".ply", ".stl"}) ? "mesh" : "neon");
-            auto it = custom_out.find(f);
-            std::string outp;
-            if (it != custom_out.end()) {
-                outp = it->second;
-            } else {
-                auto te = tag_and_ext_for(command, f, o);
-                outp = default_output_for(f, te.first, te.second, o.next_to_input);
-            }
+            auto te = tag_and_ext_for(command, f, o);
+            std::string outp = output_for_arg(f, o.output, te.first, te.second, o.next_to_input);
+            std::printf("  %s\n    -> %s\n", f.c_str(), outp.c_str());
             if (command == "neon") neon_pairs.emplace_back(f, outp);
             else if (command == "audio") audio_pairs.emplace_back(f, outp);
             else mesh_pairs.emplace_back(f, outp);
@@ -848,13 +865,14 @@ inline void print_usage() {
         "  image | video | audio | mesh | batch | profiles\n"
         "\n"
         "options:\n"
-        "  --palette <name>         electric crimson ice toxic violet golden ghost spectrum\n"
+        "  --palette <name>         electric synthwave toxic ice fire ghost spectrum\n"
         "  --glow <0.1-3.0>         glow intensity (default 1)\n"
         "  --threshold <0.02-0.5>   edge sensitivity (default 0.12)\n"
         "  --env <0-2>              ambient detail (default 1)\n"
         "  -o, --output <path>      output file, or a folder to collect the auto names\n"
         "  --next-to-input          save outputs next to the input file instead of results/\n"
-        "  --keep-inside            keep the original look under the effect (images and videos)\n"
+        "  --keep-inside            keep the original, neon only on the edges (images/videos)\n"
+        "  --global-glow            keep the original under the full global glow field\n"
         "  --profile <name>         audio profile: fire ice robotic ghost void echo slash\n"
         "  --neon-audio             neonify the audio with the video\n"
         "  --no-spatial             disable spatial glow (stereo pan)\n"
@@ -896,7 +914,8 @@ inline int run_cli(int argc, char** argv) {
         else if (a == "--env") o.env = next_float(1.0f);
         else if (a == "-o" || a == "--output") o.output = next_str("");
         else if (a == "--next-to-input") o.next_to_input = true;
-        else if (a == "--keep-inside") o.keep_inside = true;
+        else if (a == "--keep-inside") o.inside_mode = 1;
+        else if (a == "--global-glow") o.inside_mode = 2;
         else if (a == "--profile") o.profile = next_str("");
         else if (a == "--neon-audio") o.neon_audio = true;
         else if (a == "--no-spatial") o.spatial = false;
