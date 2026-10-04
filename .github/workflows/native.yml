@@ -98,6 +98,10 @@ jobs:
             -DOpenCV_DIR="D:\src\ocvbuild"
           cmake --build build --config Release -j 4
 
+      - name: ffmpeg for the audio smoke
+        shell: pwsh
+        run: choco install ffmpeg -y --no-progress | Out-Null
+
       - name: smoke test (the real exe, image + audio + composite modes + ini)
         shell: pwsh
         run: |
@@ -140,10 +144,12 @@ jobs:
       - name: desktop neonifier probe smoke
         shell: pwsh
         run: |
-          $out = & build\Release\neonify-desktop.exe probe 2>&1 | Out-String
+          # a gui-subsystem exe has no console of its own — cmd owns the redirect
+          cmd /c "build\Release\neonify-desktop.exe probe > probe_report.txt 2>&1"
+          $out = Get-Content probe_report.txt -Raw -ErrorAction SilentlyContinue
           Write-Host $out
-          if ($LASTEXITCODE -ne 0) { Write-Host "desktop probe FAILED"; exit 1 }
-          if ($out -notmatch "desktop backend:") { Write-Host "desktop probe FAILED - no report"; exit 1 }
+          if (-not $out) { Write-Host "desktop probe FAILED - no report"; exit 1 }
+          if ($out -notmatch "desktop backend:") { Write-Host "desktop probe FAILED - bad report"; exit 1 }
 
       - name: collect portable bundle
         shell: pwsh
@@ -176,7 +182,7 @@ jobs:
             libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev \
             libfreetype6-dev libgl1-mesa-dev libglib2.0-dev ninja-build \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libunwind-dev xvfb \
-            ocl-icd-opencl-dev libpipewire-0.3-dev libsystemd-dev
+            ocl-icd-opencl-dev libpipewire-0.3-dev libsystemd-dev ffmpeg
 
       - name: cache static qt
         id: qtcache

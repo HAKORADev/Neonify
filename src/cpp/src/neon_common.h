@@ -651,7 +651,9 @@ inline void attach_parent_console(int argc, char** argv) {
 #ifdef _WIN32
     if (argc < 2) return;
     std::string a0 = argv[1];
-    if (a0 == "gui" || a0 == "--help" || a0 == "-h") return;
+    // gui and probe speak through their redirected pipes — only the raw cli
+    // double-click needs the parent console
+    if (a0 == "gui" || a0 == "probe" || a0 == "--help" || a0 == "-h") return;
     if (GetConsoleWindow() != nullptr) { console_utf8(); return; }
     if (!AttachConsole(ATTACH_PARENT_PROCESS)) return;
     freopen("CONOUT$", "w", stdout);
